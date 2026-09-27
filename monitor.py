@@ -1,9 +1,12 @@
 """
-Doomsday Watch — alerts on Telegram when Avengers: Doomsday showtimes appear
+Doomsday Watch: alerts on Telegram when Avengers: Doomsday showtimes appear
 on Shaw Theatres or Golden Village (any format, any cinema).
 
 Runs once per invocation (GitHub Actions calls it every ~5 minutes).
 State is kept in state.json so each finding is only alerted once.
+
+Alerts are sent as a rendered dashboard card (card.py) with booking buttons.
+If rendering or sending the photo fails, a plain-text alert goes out instead.
 
 Env vars:
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (required)
@@ -17,6 +20,7 @@ import random
 import re
 import sys
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -25,15 +29,20 @@ SGT = timezone(timedelta(hours=8))
 TEST_MODE = os.environ.get("TEST_MODE", "").lower() == "true"
 
 if TEST_MODE:
+    TITLE = "Avengers: Endgame Encore"
     TITLE_RE = re.compile(r"endgame", re.I)
     SHAW_MOVIE_IDS = ["1261"]          # Endgame Encore (standard) on Shaw
     GV_FILM_CODES = ["1465"]           # Endgame Encore (standard) on GV
     STATE_FILE = None                  # test runs never persist state
 else:
+    TITLE = "Avengers: Doomsday"
     TITLE_RE = re.compile(r"doomsday", re.I)
     SHAW_MOVIE_IDS = ["1112"]          # Avengers: Doomsday movieId on Shaw (release page 1633)
     GV_FILM_CODES = ["1395"]           # Avengers: Doomsday filmCd on GV
     STATE_FILE = "state.json"
+
+GV_URL = "https://www.gv.com.sg/GVMovieDetails#/movie/1395"
+SHAW_URL = "https://shaw.sg/movie-details/1633"
 
 SHAW_BASE = "https://shaw.sg/internal"
 SHAW_HEADERS = {"x-api-forward-to": "internal", "x-app": "PWSM"}
@@ -45,6 +54,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 FAIL_ALERT_AFTER = 3          # consecutive failed runs before an error alert (~15 min)
 HEARTBEAT_HOUR_SGT = 9        # daily "still watching" message after 9am SGT
+SHAW_MAX_DATES = 21           # cap on per-date showtime lookups when building the card
 
 
 class SiteError(Exception):
@@ -58,7 +68,8 @@ def make_session():
 
 
 def get_json(session, url, **kw):
-    for attempt in range(2):
+    last = None
+    for _ in range(2):
         try:
             r = session.request(timeout=20, url=url, **kw)
             r.raise_for_status()
@@ -69,38 +80,106 @@ def get_json(session, url, **kw):
     raise SiteError(f"{url.split('?')[0]} → {type(last).__name__}: {str(last)[:150]}")
 
 
+def clean_title(t):
+    return re.sub(r"\s+", " ", (t or "").replace("*", "")).strip()
+
+
+def time_key(t):
+    """'6:50PM' / '6:50 PM' / '1850' → minutes since midnight, for sorting."""
+    t = (t or "").strip().upper().replace(" ", "")
+    m = re.match(r"^(\d{1,2}):(\d{2})(AM|PM)$", t)
+    if m:
+        h, mi = int(m.group(1)) % 12, int(m.group(2))
+        return (h + (12 if m.group(3) == "PM" else 0)) * 60 + mi
+    if t.isdigit() and len(t) == 4:
+        return int(t[:2]) * 60 + int(t[2:])
+    return 0
+
+
 # ---------------------------------------------------------------- Shaw
 
+SHAW_FORMATS = {"IMAX LASER": "IMAX Laser", "INFINITY VISION": "Infinity Vision",
+                "DREAMERS": "Dreamers", "PREMIERE": "Premiere", "LUMIERE": "Lumiere"}
+
+
+def shaw_format(name):
+    m = re.search(r"\(([^()]*)\)\s*$", name or "")
+    if not m:
+        return "Standard"
+    raw = re.sub(r"^\s*2D\s*\|\s*", "", m.group(1)).strip().upper()
+    return SHAW_FORMATS.get(raw, raw.title().replace("Imax", "IMAX"))
+
+
 def check_shaw(session):
-    """Returns (findings: dict key->description, summary lines)."""
+    """Cheap check. Returns (findings: key -> text, ctx for building the card)."""
     findings = {}
     selectors = get_json(session, f"{SHAW_BASE}/get_selectors?cache=no-cache",
                          method="GET", headers=SHAW_HEADERS)
     if not isinstance(selectors, list):
         raise SiteError("Shaw get_selectors returned unexpected shape")
 
+    locations = {str(s["code"]): s["name"].replace("Shaw Theatres ", "")
+                 for s in selectors if s.get("type") == 2}
     # type 1 = movies that currently have bookable showtimes
     listed = [m for m in selectors if m.get("type") == 1 and TITLE_RE.search(m.get("name", ""))]
-    movie_ids = list(dict.fromkeys(SHAW_MOVIE_IDS + [str(m["code"]) for m in listed]))
     names = {str(m["code"]): m["name"] for m in listed}
-
     for m in listed:
         findings[f"shaw:listed:{m['code']}"] = f"Shaw lists <b>{m['name']}</b> as bookable"
 
-    for mid in movie_ids:
+    dates_by_movie = {}
+    for mid in dict.fromkeys(SHAW_MOVIE_IDS + list(names)):
         dates = get_json(session, f"{SHAW_BASE}/get_date_selectors?movieId={mid}",
                          method="GET", headers=SHAW_HEADERS)
         if not isinstance(dates, list):
             raise SiteError(f"Shaw get_date_selectors({mid}) returned unexpected shape")
         codes = sorted(d.get("code") for d in dates if d.get("code"))
         if codes:
-            label = names.get(mid, "Avengers: Doomsday" if not TEST_MODE else "Endgame Encore")
+            dates_by_movie[mid] = codes
+            label = names.get(mid, TITLE)
             findings[f"shaw:dates:{mid}"] = (
                 f"Shaw <b>{label}</b>: showtimes on {len(codes)} date(s), {codes[0]} → {codes[-1]}")
-    return findings
+    return findings, {"names": names, "dates": dates_by_movie, "locations": locations}
+
+
+def shaw_rows(session, ctx):
+    rows = []
+    for mid, dates in ctx["dates"].items():
+        shows = []
+        for dt in dates[:SHAW_MAX_DATES]:
+            for movie in get_json(session, f"{SHAW_BASE}/get_show_times?date={dt}&movieId={mid}",
+                                  method="GET", headers=SHAW_HEADERS) or []:
+                shows.extend(movie.get("showTimes") or [])
+        name = ctx["names"].get(mid) or (shows[0].get("primaryTitle") if shows else TITLE)
+        cinemas = sorted({ctx["locations"].get(str(s.get("locationId")), str(s.get("locationId")))
+                          for s in shows})
+        venues = " ".join(s.get("locationVenueName") or "" for s in shows).lower()
+        note = None
+        extras = [n for n in ("Lumiere", "Premiere", "Dreamers") if n.lower() in venues]
+        if shaw_format(name) == "Standard" and extras:
+            note = "incl. " + " & ".join(extras)
+        first = min(shows, key=lambda s: (s.get("displayDate", ""), time_key(s.get("displayTime"))),
+                    default=None)
+        rows.append({
+            "chain": "Shaw", "code": mid, "label": shaw_format(name), "note": note,
+            "cinemas": cinemas, "shows": len(shows), "dates": dates,
+            "first": first and {"date": first["displayDate"], "time": first["displayTime"],
+                                "cinema": first.get("locationVenueName") or "",
+                                "sort": first["displayDate"] + f"{time_key(first['displayTime']):04d}"},
+        })
+    return rows
 
 
 # ---------------------------------------------------------------- GV
+
+GV_FORMATS = {"IV": "Infinity Vision", "ATMOS IV": "Dolby Atmos · Infinity Vision",
+              "GVMAX": "GVmax", "ATMOS": "Dolby Atmos", "GOLD CLASS": "Gold Class",
+              "3D": "3D", "D-BOX": "D-Box", "DREAMERS": "Dreamers"}
+
+
+def gv_prefix(title):
+    m = re.match(r"^\s*\(([^()]*)\)", title or "")
+    return m.group(1).strip() if m else None
+
 
 def gv_post(session, path, body=None):
     t = f"{random.randint(1, 1000)}_{int(time.time() * 1000)}"
@@ -109,7 +188,8 @@ def gv_post(session, path, body=None):
 
 
 def check_gv(session):
-    findings = {}
+    """Returns (findings, rows). GV's session data already has everything the card needs."""
+    findings, rows = {}, []
     try:  # pick up any cookies the site sets; harmless if it fails
         session.get("https://www.gv.com.sg/", timeout=20)
     except requests.RequestException:
@@ -126,7 +206,7 @@ def check_gv(session):
             if TITLE_RE.search(title):
                 films[str(m.get("filmCd"))] = title
                 findings[f"gv:listed:{m.get('filmCd')}"] = (
-                    f"GV lists <b>{title.strip(' *')}</b> under "
+                    f"GV lists <b>{clean_title(title)}</b> under "
                     f"{'Advance Sales' if listing == 'advancesales' else 'Now Showing'}")
 
     for code in dict.fromkeys(GV_FILM_CODES + list(films)):
@@ -136,30 +216,119 @@ def check_gv(session):
         data = res.get("data")
         if not data:          # "No record found." → no showtimes yet
             continue
-        cinemas, dates = set(), set()
+        title = data.get("filmTitle") or films.get(code) or code
+        prefix = gv_prefix(title)
+
+        groups = {}           # label -> list of (cinema, date, time24, time12)
         for loc in data.get("locations", []) or []:
+            cinema = loc.get("name", "?")
+            if prefix:
+                label = GV_FORMATS.get(prefix.upper(), prefix)
+            elif cinema.startswith("Gold Class"):
+                label = "Gold Class"
+            elif cinema.upper().startswith("GVMAX"):
+                label = "GVmax"
+            else:
+                label = "Standard"
             for d in loc.get("dates", []) or []:
-                if d.get("times"):
-                    cinemas.add(loc.get("name", "?"))
-                    dates.add(datetime.fromtimestamp(d["date"] / 1000, SGT).strftime("%Y-%m-%d"))
-        if cinemas:
-            title = (data.get("filmTitle") or films.get(code) or code).strip(" *")
-            ds = sorted(dates)
-            findings[f"gv:sessions:{code}"] = (
-                f"GV <b>{title}</b>: showtimes at {len(cinemas)} cinema(s), {ds[0]} → {ds[-1]}")
-    return findings
+                day = datetime.fromtimestamp(d["date"] / 1000, SGT).strftime("%Y-%m-%d")
+                for t in d.get("times", []) or []:
+                    groups.setdefault(label, []).append(
+                        (cinema, day, t.get("time24") or "", t.get("time12") or ""))
+
+        if not groups:
+            continue
+        all_dates = sorted({s[1] for g in groups.values() for s in g})
+        findings[f"gv:sessions:{code}"] = (
+            f"GV <b>{clean_title(title)}</b>: showtimes at "
+            f"{len({s[0] for g in groups.values() for s in g})} cinema(s), "
+            f"{all_dates[0]} → {all_dates[-1]}")
+        for label, shows in groups.items():
+            first = min(shows, key=lambda s: (s[1], s[2]))
+            rows.append({
+                "chain": "GV", "code": code, "label": label, "note": None,
+                "cinemas": sorted({s[0] for s in shows}), "shows": len(shows),
+                "dates": sorted({s[1] for s in shows}),
+                "first": {"date": first[1], "time": first[3], "cinema": first[0],
+                          "sort": first[1] + f"{time_key(first[2] or first[3]):04d}"},
+            })
+    return findings, rows
 
 
-# ---------------------------------------------------------------- Telegram / state
+# ---------------------------------------------------------------- Telegram
 
-def send_telegram(text):
-    token, chat = os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
-    r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=20, json={
-        "chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+def tg(method, **kw):
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    r = requests.post(f"https://api.telegram.org/bot{token}/{method}", timeout=30, **kw)
     if not r.ok:
-        print(f"Telegram error {r.status_code}: {r.text[:200]}", file=sys.stderr)
+        print(f"Telegram {method} error {r.status_code}: {r.text[:200]}", file=sys.stderr)
         r.raise_for_status()
+    return r
 
+
+def buttons():
+    return {"inline_keyboard": [[{"text": "🎟 Book at GV", "url": GV_URL},
+                                 {"text": "🎟 Book at Shaw", "url": SHAW_URL}]]}
+
+
+def send_telegram(text, with_buttons=False):
+    payload = {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text, "parse_mode": "HTML",
+               "disable_web_page_preview": True}
+    if with_buttons:
+        payload["reply_markup"] = buttons()
+    tg("sendMessage", json=payload)
+
+
+def send_card(png, caption):
+    tg("sendPhoto", data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "caption": caption,
+                          "parse_mode": "HTML", "reply_markup": json.dumps(buttons())},
+       files={"photo": ("doomsday.png", png, "image/png")})
+
+
+def caption_for(mode, rows, new_rows):
+    by = lambda c: sorted({r["label"] for r in rows if r["chain"] == c})  # noqa: E731
+    firsts = [r["first"] for r in rows if r.get("first")]
+    first = min(firsts, key=lambda f: f["sort"]) if firsts else None
+    first_line = (f"\nEarliest: {datetime.strptime(first['date'], '%Y-%m-%d'):%a %-d %b}, "
+                  f"{first['time']} · {first['cinema']}") if first else ""
+    chains = " · ".join(f"{c}: {len(by(c))} format{'s' if len(by(c)) != 1 else ''}"
+                        for c in ("GV", "Shaw") if by(c))
+    if mode == "test":
+        return f"🧪 <b>TEST RUN</b> — {TITLE}\n{chains}{first_line}"
+    if mode == "live":
+        return f"🚨 <b>AVENGERS: DOOMSDAY TICKETS ARE LIVE</b>\n{chains}{first_line}"
+    news = "\n".join(f"• {r['chain']} {r['label']}" for r in new_rows) or "• more showtimes"
+    return f"🆕 <b>New Doomsday showtimes</b>\n{news}"
+
+
+def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
+    """Card first; plain text if anything about the card fails."""
+    try:
+        import card
+        rows = list(gv_rows)
+        if shaw_ctx and shaw_ctx["dates"]:
+            rows += shaw_rows(make_session(), shaw_ctx)
+        for r in rows:
+            prefix = "gv" if r["chain"] == "GV" else "shaw"
+            r["new"] = mode != "test" and any(k.startswith(f"{prefix}:") and k.endswith(f":{r['code']}")
+                                              for k in new_keys)
+        order = {"Standard": 0, "Gold Class": 1}
+        rows.sort(key=lambda r: (order.get(r["label"], 2), -r["shows"]))
+        png = card.render({"title": TITLE, "mode": mode, "checked_at": datetime.now(SGT),
+                           "rows": rows})
+        send_card(png, caption_for(mode, rows, [r for r in rows if r.get("new")]))
+        return
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    head = {"test": f"🧪 <b>TEST RUN</b> ({TITLE})",
+            "live": "🚨🚨 <b>AVENGERS: DOOMSDAY TICKETS ARE OUT!</b>",
+            "update": "🆕 <b>More Doomsday showtimes/formats just opened</b>"}[mode]
+    items = findings if mode == "test" else {k: findings[k] for k in new_keys}
+    body = "\n".join(f"• {v}" for v in items.values()) or "• nothing found"
+    send_telegram(f"{head}\n{body}", with_buttons=True)
+
+
+# ---------------------------------------------------------------- state / main
 
 def load_state():
     if STATE_FILE and os.path.exists(STATE_FILE):
@@ -175,20 +344,21 @@ def save_state(state):
             f.write("\n")
 
 
-LINKS = ("\n\n🎟 <a href=\"https://www.gv.com.sg/GVMovieDetails#/movie/1395\">GV</a> · "
-         "<a href=\"https://shaw.sg/movie-details/1633\">Shaw</a>")
-
-
 def run():
     state = load_state()
     seen = set(state.get("seen", []))
     failures = state.get("failures", {})
     now = datetime.now(SGT)
-    all_findings, ok_sites = {}, []
+    findings, ok_sites = {}, []
+    shaw_ctx, gv_rows = None, []
 
-    for site, fn in (("Shaw", check_shaw), ("GV", check_gv)):
+    for site in ("Shaw", "GV"):
         try:
-            all_findings.update(fn(make_session()))
+            if site == "Shaw":
+                f, shaw_ctx = check_shaw(make_session())
+            else:
+                f, gv_rows = check_gv(make_session())
+            findings.update(f)
             ok_sites.append(site)
             if failures.get(site, 0) >= FAIL_ALERT_AFTER and not TEST_MODE:
                 send_telegram(f"✅ {site} checks are working again.")
@@ -200,20 +370,16 @@ def run():
                 send_telegram(f"⚠️ {site} check failing ({failures[site]}x in a row):\n"
                               f"<code>{str(e)[:300]}</code>")
 
-    new = {k: v for k, v in all_findings.items() if k not in seen}
-    print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(all_findings)} | new={len(new)}")
+    new_keys = [k for k in findings if k not in seen]
+    print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}")
 
     if TEST_MODE:
-        body = "\n".join(f"• {v}" for v in all_findings.values()) or "• nothing found"
-        send_telegram(f"🧪 <b>TEST RUN</b> (watching Endgame Encore)\n{body}{LINKS}")
+        send_alert("test", findings, new_keys, shaw_ctx, gv_rows)
         return
 
-    if new:
-        first = not seen
-        head = ("🚨🚨 <b>AVENGERS: DOOMSDAY TICKETS ARE OUT!</b>" if first
-                else "🆕 <b>More Doomsday showtimes/formats just opened</b>")
-        send_telegram(head + "\n" + "\n".join(f"• {v}" for v in new.values()) + LINKS)
-        seen |= set(new)
+    if new_keys:
+        send_alert("live" if not seen else "update", findings, new_keys, shaw_ctx, gv_rows)
+        seen |= set(new_keys)
 
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_SGT and state.get("heartbeat") != today:

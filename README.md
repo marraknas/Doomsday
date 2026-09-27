@@ -14,10 +14,17 @@ Each finding is alerted once (tracked in `state.json`). New formats/cinemas open
 
 ## Messages you'll get
 
-- 🚨 **Tickets are out**: the one you're waiting for, with booking links
-- 🆕 **More showtimes/formats opened**: follow-ups (e.g. IMAX opens after standard)
+- 🚨 **Tickets are out**: a dashboard card (formats, cinemas, show counts, dates, first show per
+  format, for both chains) with **Book at GV / Book at Shaw** buttons
+- 🆕 **More showtimes/formats opened**: the same card, with new formats badged **NEW**
+- If the card can't be rendered for any reason, the alert still goes out as plain text
 - 👀 **Daily heartbeat** after 9am SGT, so you know it's alive
 - ⚠️ **Check failing**: after 3 consecutive failed runs on a site; ✅ when it recovers
+
+## Files
+
+- `monitor.py`: the checks, state, and Telegram sending
+- `card.py`: renders the alert card (Pillow); fonts are in `assets/fonts` (Poppins, OFL)
 
 ## Setup
 
