@@ -271,16 +271,33 @@ def buttons():
                                  {"text": "🎟 Book at Shaw", "url": SHAW_URL}]]}
 
 
-def send_telegram(text, with_buttons=False):
-    payload = {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text, "parse_mode": "HTML",
-               "disable_web_page_preview": True}
-    if with_buttons:
-        payload["reply_markup"] = buttons()
-    tg("sendMessage", json=payload)
+def chat_ids():
+    """TELEGRAM_CHAT_ID may hold several comma-separated IDs. The FIRST is the owner:
+    heartbeats and error messages go only there; ticket alerts go to everyone."""
+    ids = [c.strip() for c in os.environ["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
+    if not ids:
+        raise RuntimeError("TELEGRAM_CHAT_ID is empty")
+    return ids
 
 
-def send_card(png, caption):
-    tg("sendPhoto", data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "caption": caption,
+def send_telegram(text, with_buttons=False, everyone=False):
+    targets = chat_ids() if everyone else chat_ids()[:1]
+    errors = []
+    for chat in targets:
+        payload = {"chat_id": chat, "text": text, "parse_mode": "HTML",
+                   "disable_web_page_preview": True}
+        if with_buttons:
+            payload["reply_markup"] = buttons()
+        try:
+            tg("sendMessage", json=payload)
+        except Exception as e:  # noqa: BLE001 — one bad chat must not block the others
+            errors.append((chat, e))
+    if errors and len(errors) == len(targets):
+        raise errors[0][1]
+
+
+def send_card(chat, png, caption):
+    tg("sendPhoto", data={"chat_id": chat, "caption": caption,
                           "parse_mode": "HTML", "reply_markup": json.dumps(buttons())},
        files={"photo": ("doomsday.png", png, "image/png")})
 
@@ -302,7 +319,14 @@ def caption_for(mode, rows, new_rows):
 
 
 def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
-    """Card first; plain text if anything about the card fails."""
+    """Ticket alerts go to every chat. Card first; plain text for any chat where the card fails."""
+    head = {"test": f"🧪 <b>TEST RUN</b> ({TITLE})",
+            "live": "🚨🚨 <b>AVENGERS: DOOMSDAY TICKETS ARE OUT!</b>",
+            "update": "🆕 <b>More Doomsday showtimes/formats just opened</b>"}[mode]
+    items = findings if mode == "test" else {k: findings[k] for k in new_keys}
+    text = f"{head}\n" + ("\n".join(f"• {v}" for v in items.values()) or "• nothing found")
+
+    png = caption = None
     try:
         import card
         rows = list(gv_rows)
@@ -316,16 +340,27 @@ def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
         rows.sort(key=lambda r: (order.get(r["label"], 2), -r["shows"]))
         png = card.render({"title": TITLE, "mode": mode, "checked_at": datetime.now(SGT),
                            "rows": rows})
-        send_card(png, caption_for(mode, rows, [r for r in rows if r.get("new")]))
-        return
+        caption = caption_for(mode, rows, [r for r in rows if r.get("new")])
     except Exception:  # noqa: BLE001
         traceback.print_exc()
-    head = {"test": f"🧪 <b>TEST RUN</b> ({TITLE})",
-            "live": "🚨🚨 <b>AVENGERS: DOOMSDAY TICKETS ARE OUT!</b>",
-            "update": "🆕 <b>More Doomsday showtimes/formats just opened</b>"}[mode]
-    items = findings if mode == "test" else {k: findings[k] for k in new_keys}
-    body = "\n".join(f"• {v}" for v in items.values()) or "• nothing found"
-    send_telegram(f"{head}\n{body}", with_buttons=True)
+
+    delivered = 0
+    for chat in chat_ids():
+        try:
+            if png is not None:
+                try:
+                    send_card(chat, png, caption)
+                    delivered += 1
+                    continue
+                except Exception:  # noqa: BLE001
+                    traceback.print_exc()
+            tg("sendMessage", json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                    "disable_web_page_preview": True, "reply_markup": buttons()})
+            delivered += 1
+        except Exception:  # noqa: BLE001 — keep going so other chats still get the alert
+            traceback.print_exc()
+    if not delivered:
+        raise RuntimeError("Alert could not be delivered to any chat")
 
 
 # ---------------------------------------------------------------- state / main
