@@ -1,0 +1,53 @@
+name: Doomsday Watch
+
+on:
+  schedule:
+    # Every 5 minutes, offset to :02/:07/:12… to dodge the top-of-hour rush on GitHub's scheduler
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "Test run: watch Endgame Encore (has showtimes now) and always message"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: doomsday-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet requests
+
+      - name: Check cinemas
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+          TEST_MODE: ${{ inputs.test_mode && 'true' || 'false' }}
+        run: python monitor.py
+
+      # Saving state only when it changes. The daily heartbeat guarantees at least one
+      # commit per day, which keeps GitHub from auto-disabling the schedule after 60 days.
+      - name: Save state
+        if: ${{ !inputs.test_mode }}
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git config user.name "doomsday-watch-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "Update watch state"
+            git pull --rebase --quiet && git push --quiet
+          fi
