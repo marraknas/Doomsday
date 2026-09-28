@@ -245,3 +245,162 @@ def _row(d, x0, y, x1, r, accent):
         txt = f"{short_date(f['date'])}, {f['time']}  ·  {f['cinema']}"
         d.text((px, y + 82), fit(d, txt, font("regular", 18), right - px), font=font("regular", 18),
                fill=C["muted"])
+
+
+# ================================================================== IMAX timetable card
+#
+# imax_snapshot = {
+#   "title": "Avengers: Doomsday",
+#   "mode": "live" | "update" | "test",
+#   "checked_at": datetime (SGT),
+#   "cinemas": ["Jewel", "Lido", ...],                    # column order
+#   "days": [ {"date": "2026-12-17", "new": bool,
+#              "shows": {"Jewel": [{"time": "12:10 PM", "status": "AV"}, ...], ...}}, ... ],
+#   "more_days": 3,                                       # dates not shown on the card
+#   "total_shows": 42,
+# }
+
+IMAX = {"accent": (56, 189, 248), "accent2": (99, 102, 241), "chip": (22, 36, 52),
+        "chip_line": (44, 86, 120), "fast": (245, 158, 11), "sold": (112, 116, 130)}
+
+DATE_W = 150
+CHIP_H = 38
+CHIP_GAP = 8
+
+
+def _status(s):
+    s = (s or "AV").upper()
+    if s in ("SO", "FULL", "SOLDOUT"):
+        return "sold"
+    if s in ("AV", "", "A"):
+        return "open"
+    return "fast"          # any other code (limited / filling fast)
+
+
+def render_imax(snap):
+    mode = snap.get("mode", "live")
+    cinemas = snap["cinemas"] or ["—"]
+    days = snap["days"]
+    n = len(cinemas)
+    grid_x0 = PAD + DATE_W
+    col_w = (W - PAD - grid_x0) / n
+    chip_font = font("medium", 18 if col_w >= 170 else 16)
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    chip_w = int(probe.textlength("12:10 PM", font=chip_font)) + 22
+    per_row = max(1, int((col_w - 20 + CHIP_GAP) // (chip_w + CHIP_GAP)))
+
+    def rows_needed(day):
+        return max([1] + [-(-len(day["shows"].get(c, [])) // per_row) for c in cinemas])
+
+    row_heights = [max(108, rows_needed(d) * (CHIP_H + CHIP_GAP) - CHIP_GAP + 46) for d in days] or [108]
+
+    header_h = 300
+    colhead_h = 64
+    footer_h = 96
+    H = header_h + colhead_h + sum(row_heights) + footer_h + 20
+
+    img = Image.new("RGB", (W, H), C["bg"])
+    glow = Image.new("RGB", (W, H), C["bg"])
+    gd = ImageDraw.Draw(glow)
+    gd.ellipse((-260, -460, W * 0.7, 360), fill=blend(IMAX["accent2"], C["bg"], 0.55))
+    gd.ellipse((W * 0.45, -340, W + 260, 300), fill=blend(IMAX["accent"], C["bg"], 0.45))
+    img.paste(glow.filter(ImageFilter.GaussianBlur(130)))
+    d = ImageDraw.Draw(img)
+
+    # --- header
+    y = PAD
+    d.text((PAD, y), "DOOMSDAY WATCH  ·  SHAW THEATRES", font=font("bold", 20), fill=C["muted"])
+    label, col = {"live": ("IMAX IS OPEN", IMAX["accent"]),
+                  "update": ("NEW IMAX DATES", IMAX["accent"]),
+                  "test": ("TEST RUN", C["test"])}[mode]
+    sf = font("bold", 18)
+    sw = d.textlength(label, font=sf) + 58
+    sx = W - PAD - sw
+    d.rounded_rectangle((sx, y - 6, sx + sw, y + 32), radius=19, fill=col)
+    d.ellipse((sx + 16, y + 7, sx + 28, y + 19), fill=C["bg"])
+    d.text((sx + 38, y + 13), label, font=sf, fill=C["bg"], anchor="lm")
+
+    y += 42
+    d.text((PAD, y), "IMAX LASER", font=font("bold", 34), fill=IMAX["accent"])
+    y += 44
+    title = snap.get("title", "Avengers: Doomsday").upper()
+    d.text((PAD, y), fit(d, title, font("bold", 70), W - 2 * PAD), font=font("bold", 70), fill=C["text"])
+    y += 94
+    all_dates = [x["date"] for x in days]
+    span = date_span(all_dates) if all_dates else "—"
+    sub = (f"{snap.get('total_shows', 0)} IMAX showtimes  ·  {len(snap['cinemas'])} cinemas  ·  {span}"
+           f"  ·  checked {snap['checked_at']:%-I:%M %p}")
+    d.text((PAD, y), fit(d, sub, font("regular", 23), W - 2 * PAD), font=font("regular", 23), fill=C["muted"])
+
+    # --- column headers
+    y = header_h
+    d.rounded_rectangle((PAD, y, W - PAD, y + colhead_h - 10), radius=14, fill=C["panel"],
+                        outline=C["line"], width=2)
+    d.text((PAD + 20, y + (colhead_h - 10) / 2), "DATE", font=font("bold", 16), fill=C["muted"], anchor="lm")
+    for i, c in enumerate(cinemas):
+        cx = grid_x0 + i * col_w + col_w / 2
+        d.text((cx, y + (colhead_h - 10) / 2), fit(d, c.upper(), font("bold", 19), col_w - 16),
+               font=font("bold", 19), fill=C["text"], anchor="mm")
+
+    # --- day rows
+    y = header_h + colhead_h
+    for day, rh in zip(days, row_heights):
+        is_new = day.get("new") and mode == "update"
+        fill = blend(IMAX["accent"], C["panel"], 0.10) if is_new else C["panel"]
+        d.rounded_rectangle((PAD, y, W - PAD, y + rh - 10), radius=16, fill=fill,
+                            outline=IMAX["chip_line"] if is_new else C["line"], width=2)
+        dt = datetime.strptime(day["date"], "%Y-%m-%d")
+        ly = y + (rh - 10) / 2 - (44 if is_new else 30)
+        d.text((PAD + 20, ly), dt.strftime("%a").upper(), font=font("bold", 16), fill=C["muted"])
+        d.text((PAD + 20, ly + 20), dt.strftime("%-d %b"), font=font("bold", 26), fill=C["text"])
+        if is_new:
+            pill(d, PAD + 20, ly + 60, "NEW", C["bg"], C["live"], font("bold", 13), pad_x=10, h=24)
+
+        box_h = rh - 10
+        for i, c in enumerate(cinemas):
+            col_mid = grid_x0 + i * col_w + col_w / 2
+            shows = day["shows"].get(c, [])
+            if not shows:
+                d.text((col_mid, y + box_h / 2), "—", font=font("medium", 20), fill=C["dim"], anchor="mm")
+                continue
+            n_rows = -(-len(shows) // per_row)
+            group_h = n_rows * (CHIP_H + CHIP_GAP) - CHIP_GAP
+            top = y + (box_h - group_h) / 2
+            for j, s in enumerate(shows):
+                r, k = divmod(j, per_row)
+                in_row = min(per_row, len(shows) - r * per_row)
+                row_w = in_row * chip_w + (in_row - 1) * CHIP_GAP
+                x0 = col_mid - row_w / 2 + k * (chip_w + CHIP_GAP)
+                y0 = top + r * (CHIP_H + CHIP_GAP)
+                st = _status(s.get("status"))
+                bg = {"open": IMAX["chip"], "fast": blend(IMAX["fast"], C["panel"], 0.18),
+                      "sold": C["panel2"]}[st]
+                ol = {"open": IMAX["chip_line"], "fast": IMAX["fast"], "sold": C["line"]}[st]
+                fg = {"open": C["text"], "fast": (253, 230, 138), "sold": IMAX["sold"]}[st]
+                d.rounded_rectangle((x0, y0, x0 + chip_w, y0 + CHIP_H), radius=10, fill=bg, outline=ol, width=2)
+                tx = x0 + chip_w / 2
+                d.text((tx, y0 + CHIP_H / 2), s["time"], font=chip_font, fill=fg, anchor="mm")
+                if st == "sold":
+                    tw = d.textlength(s["time"], font=chip_font)
+                    d.line((tx - tw / 2 - 2, y0 + CHIP_H / 2, tx + tw / 2 + 2, y0 + CHIP_H / 2),
+                           fill=IMAX["sold"], width=2)
+        y += rh
+
+    # --- footer / legend
+    fy = H - footer_h + 10
+    lx = PAD
+    for lab, bg, ol in (("Available", IMAX["chip"], IMAX["chip_line"]),
+                        ("Selling fast", blend(IMAX["fast"], C["panel"], 0.18), IMAX["fast"]),
+                        ("Sold out", C["panel2"], C["line"])):
+        d.rounded_rectangle((lx, fy + 4, lx + 26, fy + 24), radius=6, fill=bg, outline=ol, width=2)
+        d.text((lx + 36, fy + 14), lab, font=font("regular", 18), fill=C["muted"], anchor="lm")
+        lx += 36 + d.textlength(lab, font=font("regular", 18)) + 32
+    more = snap.get("more_days", 0)
+    if more:
+        d.text((W - PAD, fy + 14), f"+{more} more date{'s' if more != 1 else ''} on shaw.sg",
+               font=font("medium", 18), fill=IMAX["accent"], anchor="rm")
+    d.text((PAD, fy + 48), "Book now:  shaw.sg  ·  Shaw Theatres app", font=font("medium", 22), fill=C["text"])
+
+    buf = io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    return buf.getvalue()

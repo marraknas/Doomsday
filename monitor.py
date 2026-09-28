@@ -98,6 +98,11 @@ def time_key(t):
 
 # ---------------------------------------------------------------- Shaw
 
+IMAX_RE = re.compile(r"\bIMAX\b", re.I)
+IMAX_MAX_DAYS = 7             # dates shown on the IMAX timetable card
+CINEMA_ORDER = ["Jewel", "Lido", "PLQ", "Jem", "Waterway Pt"]
+CINEMA_SHORT = {"Waterway Point": "Waterway Pt", "Paya Lebar Quarter": "PLQ"}
+
 SHAW_FORMATS = {"IMAX LASER": "IMAX Laser", "INFINITY VISION": "Infinity Vision",
                 "DREAMERS": "Dreamers", "PREMIERE": "Premiere", "LUMIERE": "Lumiere"}
 
@@ -138,7 +143,12 @@ def check_shaw(session):
             label = names.get(mid, TITLE)
             findings[f"shaw:dates:{mid}"] = (
                 f"Shaw <b>{label}</b>: showtimes on {len(codes)} date(s), {codes[0]} → {codes[-1]}")
-    return findings, {"names": names, "dates": dates_by_movie, "locations": locations}
+            if IMAX_RE.search(label):
+                for dt in codes:          # every IMAX date is its own finding → new dates re-alert
+                    findings[f"shaw:imaxdate:{mid}:{dt}"] = f"Shaw IMAX showtimes on {dt}"
+    imax_codes = [mid for mid, n in names.items() if IMAX_RE.search(n)]
+    return findings, {"names": names, "dates": dates_by_movie, "locations": locations,
+                      "imax_codes": imax_codes}
 
 
 def shaw_rows(session, ctx):
@@ -344,23 +354,95 @@ def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
     except Exception:  # noqa: BLE001
         traceback.print_exc()
 
+    deliver(png, caption, text, buttons())
+
+
+def imax_snapshot(session, ctx, mode, new_dates):
+    per_day = {}
+    total = 0
+    for mid in ctx.get("imax_codes", []):
+        for dt in ctx["dates"].get(mid, [])[:SHAW_MAX_DATES]:
+            for movie in get_json(session, f"{SHAW_BASE}/get_show_times?date={dt}&movieId={mid}",
+                                  method="GET", headers=SHAW_HEADERS) or []:
+                for sh in movie.get("showTimes") or []:
+                    venue = (sh.get("locationVenueName")
+                             or ctx["locations"].get(str(sh.get("locationId")), "?"))
+                    cin = re.sub(r"\s*IMAX\s*", " ", venue).strip()
+                    cin = CINEMA_SHORT.get(cin, cin)
+                    per_day.setdefault(sh.get("displayDate") or dt, {}).setdefault(cin, []).append(
+                        {"time": sh.get("displayTime", "?"), "status": sh.get("seatingStatus")})
+                    total += 1
+    for day in per_day.values():
+        for lst in day.values():
+            lst.sort(key=lambda x: time_key(x["time"]))
+    dates = sorted(per_day)
+    if mode == "update" and new_dates:
+        start = min(new_dates)
+        dates_to_show = [x for x in dates if x >= start][:IMAX_MAX_DAYS]
+    else:
+        dates_to_show = dates[:IMAX_MAX_DAYS]
+    seen_cins = {c for day in per_day.values() for c in day}
+    cinemas = [c for c in CINEMA_ORDER if c in seen_cins] + sorted(seen_cins - set(CINEMA_ORDER))
+    return {"title": TITLE, "mode": mode, "checked_at": datetime.now(SGT), "cinemas": cinemas,
+            "days": [{"date": x, "new": x in new_dates, "shows": per_day[x]} for x in dates_to_show],
+            "more_days": len(dates) - len(dates_to_show), "total_shows": total}
+
+
+def imax_text(snap):
+    lines = []
+    for day in snap["days"]:
+        dt = datetime.strptime(day["date"], "%Y-%m-%d")
+        parts = [f"{c} " + ", ".join(x["time"] + (" (sold out)" if (x["status"] or "").upper() == "SO" else "")
+                                     for x in day["shows"][c])
+                 for c in snap["cinemas"] if day["shows"].get(c)]
+        lines.append(f"<b>{dt:%a %-d %b}</b>{' 🆕' if day['new'] and snap['mode'] == 'update' else ''}: "
+                     + " · ".join(parts))
+    if snap["more_days"]:
+        lines.append(f"+{snap['more_days']} more date(s) on shaw.sg")
+    return "\n".join(lines)
+
+
+def deliver(png, caption, text, markup):
+    """Send to every chat: photo+caption, or text if the photo fails for that chat."""
     delivered = 0
     for chat in chat_ids():
         try:
             if png is not None:
                 try:
-                    send_card(chat, png, caption)
+                    tg("sendPhoto", data={"chat_id": chat, "caption": caption, "parse_mode": "HTML",
+                                          "reply_markup": json.dumps(markup)},
+                       files={"photo": ("doomsday.png", png, "image/png")})
                     delivered += 1
                     continue
                 except Exception:  # noqa: BLE001
                     traceback.print_exc()
-            tg("sendMessage", json={"chat_id": chat, "text": text, "parse_mode": "HTML",
-                                    "disable_web_page_preview": True, "reply_markup": buttons()})
+            tg("sendMessage", json={"chat_id": chat, "text": text[:4000], "parse_mode": "HTML",
+                                    "disable_web_page_preview": True, "reply_markup": markup})
             delivered += 1
         except Exception:  # noqa: BLE001 — keep going so other chats still get the alert
             traceback.print_exc()
     if not delivered:
         raise RuntimeError("Alert could not be delivered to any chat")
+
+
+def send_imax_alert(mode, shaw_ctx, new_dates):
+    markup = {"inline_keyboard": [[{"text": "🎟 Book IMAX at Shaw", "url": SHAW_URL}]]}
+    snap = imax_snapshot(make_session(), shaw_ctx, mode, set(new_dates))
+    head = {"live": f"🎯 <b>IMAX IS OPEN — {TITLE}</b>",
+            "update": f"🎯 <b>New IMAX dates — {TITLE}</b>",
+            "test": f"🧪 <b>TEST RUN — IMAX</b> ({TITLE})"}[mode]
+    if mode == "update" and new_dates:
+        sub = "Just added: " + ", ".join(datetime.strptime(x, "%Y-%m-%d").strftime("%a %-d %b")
+                                         for x in sorted(new_dates))
+    else:
+        sub = f"{snap['total_shows']} IMAX showtimes at {len(snap['cinemas'])} cinemas"
+    png = None
+    try:
+        import card
+        png = card.render_imax(snap)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    deliver(png, f"{head}\n{sub}", f"{head}\n{imax_text(snap)}", markup)
 
 
 # ---------------------------------------------------------------- state / main
@@ -408,13 +490,28 @@ def run():
     new_keys = [k for k in findings if k not in seen]
     print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}")
 
+    imax_codes = set((shaw_ctx or {}).get("imax_codes", []))
+
+    def is_imax(k):
+        return k.startswith("shaw:imaxdate:") or (k.startswith("shaw:") and k.split(":")[-1] in imax_codes)
+
     if TEST_MODE:
         send_alert("test", findings, new_keys, shaw_ctx, gv_rows)
+        if imax_codes:
+            send_imax_alert("test", shaw_ctx, [])
         return
 
-    if new_keys:
+    new_imax_dates = sorted({k.split(":")[-1] for k in new_keys if k.startswith("shaw:imaxdate:")})
+    if new_imax_dates:
+        first_imax = not any(k.startswith("shaw:imaxdate:") for k in seen)
+        try:
+            send_imax_alert("live" if first_imax else "update", shaw_ctx, new_imax_dates)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+    other = [k for k in new_keys if not is_imax(k)]
+    if other:
         send_alert("live" if not seen else "update", findings, new_keys, shaw_ctx, gv_rows)
-        seen |= set(new_keys)
+    seen |= set(new_keys)
 
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_SGT and state.get("heartbeat") != today:
