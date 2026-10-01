@@ -413,8 +413,11 @@ def imax_text(snap):
 
 
 def deliver(png, caption, text, markup, chats=None):
-    """Send to every chat: photo+caption, or text if the photo fails for that chat."""
+    """Send to every chat: photo+caption, or text if the photo fails for that chat.
+    Test runs only ever go to the owner (first TELEGRAM_CHAT_ID), never to groups / CARNIVAL_CHAT_ID."""
     delivered = 0
+    if TEST_MODE:
+        chats = chat_ids()[:1]
     for chat in chats or chat_ids():
         try:
             if png is not None:
