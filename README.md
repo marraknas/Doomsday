@@ -23,10 +23,23 @@ Each finding is alerted once (tracked in `state.json`). New formats/cinemas open
 - 👀 **Daily heartbeat** after 9am SGT, so you know it's alive
 - ⚠️ **Check failing**: after 3 consecutive failed runs on a site; ✅ when it recovers
 
+## Jailer 2 at Carnival Cinemas (Golden Mile Tower)
+
+`carnival.py` watches Carnival's JSON API (`service.carnivalcinemas.sg`) for any title matching
+"Jailer 2" (incl. `(FDFS)`, language or `Jailer II` variants).
+
+- 🎬 Gold "JAILER 2" card the moment **any** showtime drops; 🆕 again whenever a new show is listed
+  or a listed show becomes bookable. Every show is a tile with booking state and seat classes /
+  prices / availability; early-morning shows (3–9 AM) get an **EARLY** badge.
+- A silent (no-sound) note when it's first announced as Coming Soon.
+- Optional secret `CARNIVAL_CHAT_ID` (comma-separated) to send Jailer alerts to different chats;
+  defaults to the same chats as `TELEGRAM_CHAT_ID`.
+
 ## Files
 
 - `monitor.py`: the checks, state, and Telegram sending
-- `card.py`: renders the alert card (Pillow); fonts are in `assets/fonts` (Poppins, OFL)
+- `card.py`: renders the alert cards (Pillow); fonts are in `assets/fonts` (Poppins, OFL)
+- `carnival.py`: Carnival Cinemas / Jailer 2 checks
 
 ## Setup
 

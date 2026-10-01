@@ -404,3 +404,174 @@ def render_imax(snap):
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)
     return buf.getvalue()
+
+
+# ================================================================== Jailer 2 / Carnival card
+#
+# jailer_snapshot = {
+#   "title": "Jailer 2", "mode": "live" | "update" | "test", "checked_at": datetime,
+#   "days": [ {"date": "2027-01-14", "first": bool, "shows": [show, ...]} ],
+#   "total": int, "bookable": int, "early": int, "more_days": int,
+#   show = {"time": "7:00 AM", "early": bool, "bookable": bool, "tag": "FDFS", "new": bool,
+#           "classes": [{"name": "Platinum", "price": 12, "status": "Available", "state": "open"|"fast"|"sold"}]}
+# }
+
+import math
+
+J = {"bg": (13, 10, 8), "gold": (247, 183, 51), "saffron": (255, 122, 26), "cream": (250, 244, 230),
+     "muted": (176, 164, 142), "dim": (112, 102, 88), "panel": (28, 23, 18), "panel2": (38, 31, 24),
+     "line": (66, 54, 40), "open": (52, 211, 153), "wait": (245, 158, 11), "sold": (239, 68, 68)}
+
+TILE_W = (W - 2 * PAD - 2 * GAP) / 3
+
+
+def _sun(d, x, y, r, col):
+    d.ellipse((x - r, y - r, x + r, y + r), fill=col)
+    for k in range(8):
+        a = k * math.pi / 4
+        d.line((x + math.cos(a) * (r + 3), y + math.sin(a) * (r + 3),
+                x + math.cos(a) * (r + 7), y + math.sin(a) * (r + 7)), fill=col, width=2)
+
+
+def _tile_h(show):
+    wrap = 32 if (show.get("early") and show.get("tag")) else 0
+    return 128 + wrap + 30 * max(1, min(3, len(show.get("classes") or [])))
+
+
+def render_jailer(snap):
+    mode = snap.get("mode", "live")
+    days = snap["days"]
+
+    def day_h(day):
+        rows = [day["shows"][i:i + 3] for i in range(0, len(day["shows"]), 3)]
+        return 78 + sum(max(_tile_h(x) for x in r) + GAP for r in rows) + 18
+
+    header_h = 330
+    footer_h = 92
+    H = header_h + sum(day_h(dd) for dd in days) + (160 if not days else 0) + footer_h
+
+    img = Image.new("RGB", (W, H), J["bg"])
+    glow = Image.new("RGB", (W, H), J["bg"])
+    gd = ImageDraw.Draw(glow)
+    gd.ellipse((-300, -520, W * 0.8, 380), fill=blend(J["saffron"], J["bg"], 0.42))
+    gd.ellipse((W * 0.5, -260, W + 300, 320), fill=blend(J["gold"], J["bg"], 0.30))
+    img.paste(glow.filter(ImageFilter.GaussianBlur(140)))
+    d = ImageDraw.Draw(img)
+
+    # --- header
+    y = PAD
+    d.text((PAD, y), "CARNIVAL CINEMAS  ·  GOLDEN MILE TOWER", font=font("bold", 20), fill=J["muted"])
+    label, col = {"live": ("SHOWTIMES OUT", J["gold"]), "update": ("NEW SHOWS", J["gold"]),
+                  "test": ("TEST RUN", C["test"])}[mode]
+    sf = font("bold", 18)
+    sw = d.textlength(label, font=sf) + 58
+    sx = W - PAD - sw
+    d.rounded_rectangle((sx, y - 6, sx + sw, y + 32), radius=19, fill=col)
+    d.ellipse((sx + 16, y + 7, sx + 28, y + 19), fill=J["bg"])
+    d.text((sx + 38, y + 13), label, font=sf, fill=J["bg"], anchor="lm")
+
+    y += 46
+    title = snap.get("title", "Jailer 2").upper()
+    tf = font("bold", 104)
+    while tf.size > 54 and d.textlength(title, font=tf) > W - 2 * PAD:
+        tf = font("bold", tf.size - 6)
+    d.text((PAD, y), title, font=tf, fill=J["gold"])
+    y += tf.size + 30
+    parts = [f"{snap['total']} show{'s' if snap['total'] != 1 else ''}", f"{snap['bookable']} bookable now"]
+    if snap.get("early"):
+        parts.append(f"{snap['early']} early")
+    parts.append(f"checked {snap['checked_at']:%a %-d %b, %-I:%M %p}")
+    d.text((PAD, y), fit(d, "  ·  ".join(parts), font("regular", 24), W - 2 * PAD), font=font("regular", 24),
+           fill=J["muted"])
+
+    # --- days
+    y = header_h
+    if not days:
+        d.rounded_rectangle((PAD, y, W - PAD, y + 130), radius=20, fill=J["panel"], outline=J["line"], width=2)
+        d.text((W / 2, y + 65), "No showtimes yet", font=font("medium", 28), fill=J["dim"], anchor="mm")
+    for day in days:
+        dt = datetime.strptime(day["date"], "%Y-%m-%d")
+        d.text((PAD, y), dt.strftime("%A").upper(), font=font("bold", 18), fill=J["saffron"])
+        dl = dt.strftime("%-d %B %Y")
+        d.text((PAD, y + 22), dl, font=font("bold", 34), fill=J["cream"])
+        px = PAD + d.textlength(dl, font=font("bold", 34)) + 16
+        if day.get("first"):
+            px += pill(d, px, y + 28, "FIRST DAY", J["bg"], J["gold"], font("bold", 14), pad_x=12, h=28) + 10
+        n = len(day["shows"])
+        d.text((W - PAD, y + 42), f"{n} show{'s' if n != 1 else ''}", font=font("medium", 20),
+               fill=J["muted"], anchor="rm")
+        y += 78
+        for r0 in range(0, n, 3):
+            row = day["shows"][r0:r0 + 3]
+            rh = max(_tile_h(x) for x in row)
+            for i, sh in enumerate(row):
+                _tile(d, PAD + i * (TILE_W + GAP), y, sh, rh)
+            y += rh + GAP
+        y += 18
+
+    # --- footer
+    fy = H - footer_h + 14
+    lx = PAD
+    for lab, c in (("Booking open", J["open"]), ("Listed, not open yet", J["wait"]), ("Sold out", J["sold"])):
+        d.ellipse((lx, fy + 6, lx + 14, fy + 20), fill=c)
+        d.text((lx + 22, fy + 13), lab, font=font("regular", 18), fill=J["muted"], anchor="lm")
+        lx += 22 + d.textlength(lab, font=font("regular", 18)) + 30
+    if snap.get("more_days"):
+        m = snap["more_days"]
+        d.text((W - PAD, fy + 13), f"+{m} more day{'s' if m != 1 else ''} on carnivalcinemas.sg",
+               font=font("medium", 18), fill=J["gold"], anchor="rm")
+    d.text((PAD, fy + 44), "Book:  carnivalcinemas.sg  ·  Golden Mile Tower, Beach Road",
+           font=font("medium", 22), fill=J["cream"])
+
+    buf = io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _tile(d, x, y, s, h):
+    bookable = s["bookable"]
+    classes = s.get("classes") or []
+    all_sold = bookable and classes and all(c["state"] == "sold" for c in classes)
+    accent = J["sold"] if all_sold else J["open"] if bookable else J["wait"]
+    new = s.get("new")
+    d.rounded_rectangle((x, y, x + TILE_W, y + h), radius=18, fill=J["panel2"] if new else J["panel"],
+                        outline=J["gold"] if new else J["line"], width=2)
+    d.rounded_rectangle((x, y + 20, x + 6, y + h - 20), radius=3, fill=accent)
+    tx, right = x + 24, x + TILE_W - 20
+    d.text((tx, y + 16), s["time"], font=font("bold", 42), fill=J["cream"])
+    if new:
+        pill(d, right - 58, y + 22, "NEW", J["bg"], J["gold"], font("bold", 14), pad_x=12, h=26)
+
+    # badges row: EARLY (sun) + variant tag, then status
+    yy = y + 72
+    bx = tx
+    bf = font("bold", 15)
+    if s.get("early"):
+        w = d.textlength("EARLY", font=bf) + 50
+        d.rounded_rectangle((bx, yy, bx + w, yy + 24), radius=12, fill=J["gold"])
+        _sun(d, bx + 17, yy + 12, 4, J["bg"])
+        d.text((bx + 34, yy + 12), "EARLY", font=bf, fill=J["bg"], anchor="lm")
+        bx += w + 8
+    if s.get("tag"):
+        tag = fit(d, s["tag"].upper(), bf, max(40, right - bx - 150))
+        bx += pill(d, bx, yy, tag, J["bg"], J["saffron"], bf, pad_x=10, h=24) + 10
+    status = "Sold out" if all_sold else "Booking open" if bookable else "Not open yet"
+    if s.get("early") and s.get("tag"):   # two badges: status gets its own line
+        yy += 32
+        bx = tx
+    d.ellipse((bx, yy + 6, bx + 12, yy + 18), fill=accent)
+    d.text((bx + 20, yy + 12), fit(d, status, font("medium", 18), right - bx - 20), font=font("medium", 18),
+           fill=accent, anchor="lm")
+    yy += 40
+    if not classes:
+        msg = "Seats show once booking opens" if not bookable else "Seat info unavailable"
+        d.text((tx, yy), fit(d, msg, font("regular", 16), right - tx), font=font("regular", 16), fill=J["dim"])
+        return
+    for c in classes[:3]:
+        col = {"open": J["muted"], "fast": J["wait"], "sold": J["sold"]}[c["state"]]
+        price = f"S${c['price']:g}" if isinstance(c.get("price"), (int, float)) else ""
+        d.text((tx, yy), fit(d, c["name"], font("medium", 17), 150), font=font("medium", 17), fill=J["cream"])
+        d.text((tx + 158, yy), price, font=font("medium", 17), fill=J["muted"])
+        d.text((right, yy), fit(d, c["status"], font("regular", 16), 96), font=font("regular", 16),
+               fill=col, anchor="ra")
+        yy += 30

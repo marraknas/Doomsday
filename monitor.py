@@ -25,6 +25,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+import carnival
+
 SGT = timezone(timedelta(hours=8))
 TEST_MODE = os.environ.get("TEST_MODE", "").lower() == "true"
 
@@ -290,14 +292,22 @@ def chat_ids():
     return ids
 
 
-def send_telegram(text, with_buttons=False, everyone=False):
-    targets = chat_ids() if everyone else chat_ids()[:1]
+def carnival_chat_ids():
+    """Optional CARNIVAL_CHAT_ID secret sends Jailer 2 alerts to different chats; default = everyone."""
+    ids = [c.strip() for c in os.environ.get("CARNIVAL_CHAT_ID", "").split(",") if c.strip()]
+    return ids or chat_ids()
+
+
+def send_telegram(text, with_buttons=False, everyone=False, silent=False, chats=None, markup=None):
+    targets = chats or (chat_ids() if everyone else chat_ids()[:1])
     errors = []
     for chat in targets:
         payload = {"chat_id": chat, "text": text, "parse_mode": "HTML",
-                   "disable_web_page_preview": True}
+                   "disable_web_page_preview": True, "disable_notification": silent}
         if with_buttons:
             payload["reply_markup"] = buttons()
+        if markup:
+            payload["reply_markup"] = markup
         try:
             tg("sendMessage", json=payload)
         except Exception as e:  # noqa: BLE001 — one bad chat must not block the others
@@ -402,10 +412,10 @@ def imax_text(snap):
     return "\n".join(lines)
 
 
-def deliver(png, caption, text, markup):
+def deliver(png, caption, text, markup, chats=None):
     """Send to every chat: photo+caption, or text if the photo fails for that chat."""
     delivered = 0
-    for chat in chat_ids():
+    for chat in chats or chat_ids():
         try:
             if png is not None:
                 try:
@@ -443,6 +453,36 @@ def send_imax_alert(mode, shaw_ctx, new_dates):
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     deliver(png, f"{head}\n{sub}", f"{head}\n{imax_text(snap)}", markup)
+
+
+def send_carnival_alert(mode, ctx, new_keys):
+    snap = carnival.snapshot(make_session(), ctx, mode, new_keys, datetime.now(SGT))
+    markup = {"inline_keyboard": [[{"text": "🎟 Book on Carnival", "url": carnival.book_url(ctx)}]]}
+    png = None
+    try:
+        import card
+        png = card.render_jailer(snap)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    deliver(png, carnival.caption(snap)[:1000], carnival.text(snap), markup, chats=carnival_chat_ids())
+
+
+def handle_carnival(cf, ctx, car_seen):
+    """Alert on any new / newly bookable Jailer 2 show; quiet note when it's announced. Returns updated seen."""
+    new = [k for k in cf if k not in car_seen]
+    if TEST_MODE:
+        send_carnival_alert("test", ctx, [])
+        return car_seen
+    show_new = [k for k in new if k.startswith(("carnival:show:", "carnival:open:"))]
+    if show_new:
+        first = not any(k.startswith("carnival:show:") for k in car_seen)
+        send_carnival_alert("live" if first else "update", ctx, show_new)
+    if "carnival:soon" in new:
+        link = {"inline_keyboard": [[{"text": "🎟 Carnival Cinemas", "url": carnival.book_url(ctx)}]]}
+        send_telegram(f"👀 {carnival.TITLE} is now listed as Coming Soon on Carnival. "
+                      f"You'll get an alert the moment any showtime drops.",
+                      silent=True, chats=carnival_chat_ids(), markup=link)
+    return car_seen | set(new)
 
 
 # ---------------------------------------------------------------- state / main
@@ -487,8 +527,29 @@ def run():
                 send_telegram(f"⚠️ {site} check failing ({failures[site]}x in a row):\n"
                               f"<code>{str(e)[:300]}</code>")
 
+    car_seen = set(state.get("carnival_seen", []))
+    car_findings, car_ctx = None, None
+    try:
+        car_findings, car_ctx = carnival.check(make_session(), test=TEST_MODE)
+        ok_sites.append("Carnival")
+        if failures.get("Carnival", 0) >= FAIL_ALERT_AFTER and not TEST_MODE:
+            send_telegram("✅ Carnival checks are working again.")
+        failures["Carnival"] = 0
+    except Exception as e:  # noqa: BLE001
+        failures["Carnival"] = failures.get("Carnival", 0) + 1
+        print(f"[Carnival] {e}", file=sys.stderr)
+        if TEST_MODE or failures["Carnival"] == FAIL_ALERT_AFTER:
+            send_telegram(f"⚠️ Carnival check failing ({failures['Carnival']}x in a row):\n"
+                          f"<code>{str(e)[:300]}</code>")
+    if car_findings is not None:
+        try:
+            car_seen = handle_carnival(car_findings, car_ctx, car_seen)
+        except Exception:  # noqa: BLE001 — never let Jailer alerts break the Doomsday watch
+            traceback.print_exc()
+
     new_keys = [k for k in findings if k not in seen]
-    print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}")
+    print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}"
+          f" | carnival={len(car_findings or {})}")
 
     imax_codes = set((shaw_ctx or {}).get("imax_codes", []))
 
@@ -516,11 +577,15 @@ def run():
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_SGT and state.get("heartbeat") != today:
         status = "tickets are OUT (see earlier alerts)" if seen else "no showtimes yet"
-        send_telegram(f"👀 Doomsday Watch still running — {status}. "
+        pri = sum(1 for k in car_seen if k.startswith("carnival:show:"))
+        jailer = (f"showtimes OUT ({pri} show(s) seen)" if pri else
+                  "announced, no showtimes yet" if "carnival:soon" in car_seen else "not on Carnival yet")
+        send_telegram(f"👀 Watch still running.\nDoomsday: {status}\nJailer 2: {jailer}\n"
                       f"Sites OK: {', '.join(ok_sites) or 'none!'}")
         state["heartbeat"] = today
 
     state["seen"] = sorted(seen)
+    state["carnival_seen"] = sorted(car_seen)
     state["failures"] = failures
     save_state(state)
 
