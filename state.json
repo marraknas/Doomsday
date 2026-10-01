@@ -1,5 +1,7 @@
 {
+  "carnival_seen": [],
   "failures": {
+    "Carnival": 0,
     "GV": 0,
     "Shaw": 0
   },
