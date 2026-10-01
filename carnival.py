@@ -87,9 +87,9 @@ def sort_key(s):
     return (s["date"], m + (1440 if m < LATE_UNTIL else 0))
 
 
-def variant(name):
+def variant(name, base_re=TARGET_RE):
     """'Jailer 2 (FDFS) (NC16)' -> 'FDFS'; '' for the plain title. Age ratings are dropped."""
-    rest = TARGET_RE.sub("", name or "")
+    rest = base_re.sub("", name or "")
     tags = [t.strip() for t in re.findall(r"\(([^()]*)\)", rest)
             if t.strip() and not RATING_RE.match(t.strip())]
     loose = re.sub(r"\([^()]*\)", "", rest).strip(" -:·")
@@ -120,22 +120,34 @@ def check(session, test=False):
          carnival:show:<sid>   a session is listed
          carnival:open:<sid>   a session is bookable
     """
-    match = (lambda n: True) if test else (lambda n: bool(TARGET_RE.search(n or "")))
     findings, sessions = {}, []
+    base_re = TARGET_RE
 
     soon = [m for m in _get(session, f"GetCommingSoonMovies?location={LOCATION}", "responseMovies")
-            if match(m.get("name"))]
+            if TARGET_RE.search(m.get("name") or "")]
     if soon and not test:
         findings["carnival:soon"] = f"{soon[0].get('name')} listed as Coming Soon"
 
     dates = _get(session, f"GetShowDatesByCinema?location={LOCATION}&CinemaCode={CINEMA}",
                  "responseShowDates")
+    everything = []
     for d in sorted({(x.get("showDateValue") or "")[:10] for x in dates if x.get("showDateValue")})[:MAX_DATES]:
         movies = _get(session, f"GetMoviesAndShowTimeByCinema?location={LOCATION}&cinemaCode={CINEMA}&date={d}",
                       "responseMoviesWithShowTime")
         for m in movies:
-            if match(m.get("movieName")):
-                sessions.extend(parse_sessions(m, d))
+            everything.extend(parse_sessions(m, d))
+
+    if test:
+        # Jailer 2 isn't on sale yet: stand in with ONE real film (the one with the most sessions),
+        # so the test card looks exactly like a real single-film Jailer 2 card.
+        counts = {}
+        for x in everything:
+            counts[x["movie"]] = counts.get(x["movie"], 0) + 1
+        stand_in = max(counts, key=lambda k: (counts[k], k)) if counts else ""
+        base_re = re.compile(re.escape(stand_in), re.I) if stand_in else TARGET_RE
+        sessions = [x for x in everything if x["movie"] == stand_in]
+    else:
+        sessions = [x for x in everything if TARGET_RE.search(x["movie"])]
 
     sessions.sort(key=sort_key)
     if sessions:
@@ -144,7 +156,9 @@ def check(session, test=False):
         findings[f"carnival:show:{s['sid']}"] = f"{s['date']} {s['time']} listed"
         if s["bookable"]:
             findings[f"carnival:open:{s['sid']}"] = f"{s['date']} {s['time']} bookable"
-    return findings, {"sessions": sessions, "soon": soon, "test": test}
+    listings = sorted({x["movie"] for x in sessions})
+    return findings, {"sessions": sessions, "soon": soon, "test": test, "base_re": base_re,
+                      "listings": listings}
 
 
 # ------------------------------------------------------------------ alert content
@@ -184,7 +198,7 @@ def snapshot(session, ctx, mode, new_keys, now):
     sessions = ctx["sessions"]
     for s in sessions:
         s["new"] = mode != "test" and s["sid"] in new_sids
-        s["tag"] = variant(s["movie"])
+        s["tag"] = variant(s["movie"], ctx.get("base_re", TARGET_RE))
     all_days = sorted({s["date"] for s in sessions})
     # updates show the days where something changed; first alert shows the opening days
     focus = [d for d in all_days if any(s["new"] for s in sessions if s["date"] == d)] if mode == "update" else []
@@ -199,11 +213,13 @@ def snapshot(session, ctx, mode, new_keys, now):
                 s["classes"] = seat_classes(session, s["sid"])
                 lookups += 1
         days.append({"date": d, "first": bool(all_days) and d == all_days[0], "shows": shows})
-    title = TITLE if not ctx.get("test") else (sessions[0]["movie"] if sessions else "Carnival test")
+    title = TITLE if not ctx.get("test") else (re.sub(r"\s*\([^()]*\)\s*$", "", sessions[0]["movie"])
+                                               if sessions else "Carnival test")
     return {"title": title, "mode": mode, "checked_at": now, "days": days,
             "total": len(sessions), "bookable": sum(1 for s in sessions if s["bookable"]),
             "early": sum(1 for s in sessions if s["early"]),
             "all_days": all_days, "more_days": len(all_days) - len(card_days),
+            "listings": ctx.get("listings", []),
             "new": [s for s in sessions if s["new"]]}
 
 

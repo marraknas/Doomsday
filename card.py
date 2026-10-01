@@ -446,7 +446,7 @@ def render_jailer(snap):
         rows = [day["shows"][i:i + 3] for i in range(0, len(day["shows"]), 3)]
         return 78 + sum(max(_tile_h(x) for x in r) + GAP for r in rows) + 18
 
-    header_h = 330
+    header_h = 350
     footer_h = 92
     H = header_h + sum(day_h(dd) for dd in days) + (160 if not days else 0) + footer_h
 
@@ -483,6 +483,11 @@ def render_jailer(snap):
     parts.append(f"checked {snap['checked_at']:%a %-d %b, %-I:%M %p}")
     d.text((PAD, y), fit(d, "  ·  ".join(parts), font("regular", 24), W - 2 * PAD), font=font("regular", 24),
            fill=J["muted"])
+    if snap.get("listings"):
+        lf, vf = font("bold", 17), font("medium", 17)
+        d.text((PAD, y + 40), "ONLY SHOWING", font=lf, fill=J["saffron"])
+        lx = PAD + d.textlength("ONLY SHOWING", font=lf) + 12
+        d.text((lx, y + 40), fit(d, "  ·  ".join(snap["listings"]), vf, W - PAD - lx), font=vf, fill=J["cream"])
 
     # --- days
     y = header_h
