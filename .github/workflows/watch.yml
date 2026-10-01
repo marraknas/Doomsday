@@ -35,6 +35,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CARNIVAL_CHAT_ID: ${{ secrets.CARNIVAL_CHAT_ID }}
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
           TEST_MODE: ${{ inputs.test_mode && 'true' || 'false' }}
         run: python monitor.py
