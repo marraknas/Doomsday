@@ -1,5 +1,7 @@
 {
-  "carnival_seen": [],
+  "carnival_seen": [
+    "carnival:soon"
+  ],
   "failures": {
     "Carnival": 0,
     "GV": 0,
