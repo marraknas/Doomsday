@@ -263,6 +263,11 @@ def _row(d, x0, y, x1, r, accent):
 IMAX = {"accent": (56, 189, 248), "accent2": (99, 102, 241), "chip": (22, 36, 52),
         "chip_line": (44, 86, 120), "fast": (245, 158, 11), "sold": (112, 116, 130)}
 
+# same timetable, Jailer gold theme (used for Jailer 2 IMAX at Shaw)
+IMAX_GOLD = {"accent": (247, 183, 51), "accent2": (255, 122, 26), "chip": (40, 31, 20),
+             "chip_line": (128, 92, 40), "fast": (244, 63, 94), "sold": (112, 116, 130),
+             "title": (247, 183, 51)}
+
 DATE_W = 150
 CHIP_H = 38
 CHIP_GAP = 8
@@ -279,6 +284,7 @@ def _status(s):
 
 def render_imax(snap):
     mode = snap.get("mode", "live")
+    P = IMAX_GOLD if snap.get("theme") == "jailer" else IMAX
     cinemas = snap["cinemas"] or ["—"]
     days = snap["days"]
     n = len(cinemas)
@@ -302,16 +308,17 @@ def render_imax(snap):
     img = Image.new("RGB", (W, H), C["bg"])
     glow = Image.new("RGB", (W, H), C["bg"])
     gd = ImageDraw.Draw(glow)
-    gd.ellipse((-260, -460, W * 0.7, 360), fill=blend(IMAX["accent2"], C["bg"], 0.55))
-    gd.ellipse((W * 0.45, -340, W + 260, 300), fill=blend(IMAX["accent"], C["bg"], 0.45))
+    gd.ellipse((-260, -460, W * 0.7, 360), fill=blend(P["accent2"], C["bg"], 0.55))
+    gd.ellipse((W * 0.45, -340, W + 260, 300), fill=blend(P["accent"], C["bg"], 0.45))
     img.paste(glow.filter(ImageFilter.GaussianBlur(130)))
     d = ImageDraw.Draw(img)
 
     # --- header
     y = PAD
-    d.text((PAD, y), "DOOMSDAY WATCH  ·  SHAW THEATRES", font=font("bold", 20), fill=C["muted"])
-    label, col = {"live": ("IMAX IS OPEN", IMAX["accent"]),
-                  "update": ("NEW IMAX DATES", IMAX["accent"]),
+    d.text((PAD, y), f"{snap.get('brand', 'DOOMSDAY WATCH')}  ·  SHAW THEATRES", font=font("bold", 20),
+           fill=C["muted"])
+    label, col = {"live": ("IMAX IS OPEN", P["accent"]),
+                  "update": ("NEW IMAX DATES", P["accent"]),
                   "test": ("TEST RUN", C["test"])}[mode]
     sf = font("bold", 18)
     sw = d.textlength(label, font=sf) + 58
@@ -321,10 +328,11 @@ def render_imax(snap):
     d.text((sx + 38, y + 13), label, font=sf, fill=C["bg"], anchor="lm")
 
     y += 42
-    d.text((PAD, y), "IMAX LASER", font=font("bold", 34), fill=IMAX["accent"])
+    d.text((PAD, y), "IMAX LASER", font=font("bold", 34), fill=P["accent"])
     y += 44
     title = snap.get("title", "Avengers: Doomsday").upper()
-    d.text((PAD, y), fit(d, title, font("bold", 70), W - 2 * PAD), font=font("bold", 70), fill=C["text"])
+    d.text((PAD, y), fit(d, title, font("bold", 70), W - 2 * PAD), font=font("bold", 70),
+           fill=P.get("title", C["text"]))
     y += 94
     all_dates = [x["date"] for x in days]
     span = date_span(all_dates) if all_dates else "—"
@@ -346,9 +354,9 @@ def render_imax(snap):
     y = header_h + colhead_h
     for day, rh in zip(days, row_heights):
         is_new = day.get("new") and mode == "update"
-        fill = blend(IMAX["accent"], C["panel"], 0.10) if is_new else C["panel"]
+        fill = blend(P["accent"], C["panel"], 0.10) if is_new else C["panel"]
         d.rounded_rectangle((PAD, y, W - PAD, y + rh - 10), radius=16, fill=fill,
-                            outline=IMAX["chip_line"] if is_new else C["line"], width=2)
+                            outline=P["chip_line"] if is_new else C["line"], width=2)
         dt = datetime.strptime(day["date"], "%Y-%m-%d")
         ly = y + (rh - 10) / 2 - (44 if is_new else 30)
         d.text((PAD + 20, ly), dt.strftime("%a").upper(), font=font("bold", 16), fill=C["muted"])
@@ -373,24 +381,24 @@ def render_imax(snap):
                 x0 = col_mid - row_w / 2 + k * (chip_w + CHIP_GAP)
                 y0 = top + r * (CHIP_H + CHIP_GAP)
                 st = _status(s.get("status"))
-                bg = {"open": IMAX["chip"], "fast": blend(IMAX["fast"], C["panel"], 0.18),
+                bg = {"open": P["chip"], "fast": blend(P["fast"], C["panel"], 0.18),
                       "sold": C["panel2"]}[st]
-                ol = {"open": IMAX["chip_line"], "fast": IMAX["fast"], "sold": C["line"]}[st]
-                fg = {"open": C["text"], "fast": (253, 230, 138), "sold": IMAX["sold"]}[st]
+                ol = {"open": P["chip_line"], "fast": P["fast"], "sold": C["line"]}[st]
+                fg = {"open": C["text"], "fast": (253, 230, 138), "sold": P["sold"]}[st]
                 d.rounded_rectangle((x0, y0, x0 + chip_w, y0 + CHIP_H), radius=10, fill=bg, outline=ol, width=2)
                 tx = x0 + chip_w / 2
                 d.text((tx, y0 + CHIP_H / 2), s["time"], font=chip_font, fill=fg, anchor="mm")
                 if st == "sold":
                     tw = d.textlength(s["time"], font=chip_font)
                     d.line((tx - tw / 2 - 2, y0 + CHIP_H / 2, tx + tw / 2 + 2, y0 + CHIP_H / 2),
-                           fill=IMAX["sold"], width=2)
+                           fill=P["sold"], width=2)
         y += rh
 
     # --- footer / legend
     fy = H - footer_h + 10
     lx = PAD
-    for lab, bg, ol in (("Available", IMAX["chip"], IMAX["chip_line"]),
-                        ("Selling fast", blend(IMAX["fast"], C["panel"], 0.18), IMAX["fast"]),
+    for lab, bg, ol in (("Available", P["chip"], P["chip_line"]),
+                        ("Selling fast", blend(P["fast"], C["panel"], 0.18), P["fast"]),
                         ("Sold out", C["panel2"], C["line"])):
         d.rounded_rectangle((lx, fy + 4, lx + 26, fy + 24), radius=6, fill=bg, outline=ol, width=2)
         d.text((lx + 36, fy + 14), lab, font=font("regular", 18), fill=C["muted"], anchor="lm")
@@ -398,7 +406,7 @@ def render_imax(snap):
     more = snap.get("more_days", 0)
     if more:
         d.text((W - PAD, fy + 14), f"+{more} more date{'s' if more != 1 else ''} on shaw.sg",
-               font=font("medium", 18), fill=IMAX["accent"], anchor="rm")
+               font=font("medium", 18), fill=P["accent"], anchor="rm")
     d.text((PAD, fy + 48), "Book now:  shaw.sg  ·  Shaw Theatres app", font=font("medium", 22), fill=C["text"])
 
     buf = io.BytesIO()

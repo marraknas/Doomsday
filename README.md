@@ -35,6 +35,16 @@ Each finding is alerted once (tracked in `state.json`). New formats/cinemas open
 - Optional secret `CARNIVAL_CHAT_ID` (comma-separated) to send Jailer alerts to different chats;
   defaults to the same chats as `TELEGRAM_CHAT_ID`.
 
+## Jailer 2 IMAX at Shaw
+
+`check_shaw_jailer` in `monitor.py` watches Shaw for an IMAX listing matching "Jailer 2"
+(Shaw names Indian IMAX releases like `TITLE (IMAX) (Tam)`). Alerts go to the **Jailer chats**
+(`CARNIVAL_CHAT_ID`), never the Doomsday group:
+
+- 👀 silent note when it appears under Shaw's IMAX **Coming Soon**; ⏰ note if Shaw publishes a sales start time
+- 🎯 gold **IMAX timetable card** (every IMAX showtime by cinema and date) the moment showtimes open,
+  and again whenever Shaw adds new IMAX dates. State is kept separately in `state.json` → `jailer_imax_seen`.
+
 ## Files
 
 - `monitor.py`: the checks, state, and Telegram sending
