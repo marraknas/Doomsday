@@ -9,7 +9,9 @@
     "Shaw-Jailer": 0
   },
   "heartbeat": "2026-10-09",
-  "jailer_imax_seen": [],
+  "jailer_imax_seen": [
+    "shawj:soon:2072"
+  ],
   "seen": [
     "gv:listed:1471",
     "gv:listed:7508",
