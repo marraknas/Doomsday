@@ -45,11 +45,24 @@ Each finding is alerted once (tracked in `state.json`). New formats/cinemas open
 - 🎯 gold **IMAX timetable card** (every IMAX showtime by cinema and date) the moment showtimes open,
   and again whenever Shaw adds new IMAX dates. State is kept separately in `state.json` → `jailer_imax_seen`.
 
+## Jailer 2 at MY Cinemas (Causeway Point)
+
+`mycinemas.py` checks mycinemas.sg (server-rendered pages, no JSON API) for Jailer 2 only:
+the pre-published Jailer 2 page (`/movie/jailer-2-2`) is polled directly, plus any homepage
+`/movie/...` link whose slug matches Jailer 2 (e.g. a separate FDFS page). Seat counts come from the
+site's own `ajax/book-status-ajax.php` (Available / Filling Fast >40% / Sold Out).
+
+- Same gold card as Carnival (MY Cinemas branding): alert on any new or newly bookable show,
+  with seats left per show and EARLY badges for 3–9 AM shows.
+- Silent note when Jailer 2 appears under "What's Coming" (with its release date).
+- Goes to the Jailer chats (`CARNIVAL_CHAT_ID`); state in `state.json` → `mycinemas_seen`.
+
 ## Files
 
 - `monitor.py`: the checks, state, and Telegram sending
 - `card.py`: renders the alert cards (Pillow); fonts are in `assets/fonts` (Poppins, OFL)
 - `carnival.py`: Carnival Cinemas / Jailer 2 checks
+- `mycinemas.py`: MY Cinemas / Jailer 2 checks
 
 ## Setup
 

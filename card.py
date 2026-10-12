@@ -468,7 +468,7 @@ def render_jailer(snap):
 
     # --- header
     y = PAD
-    d.text((PAD, y), "CARNIVAL CINEMAS  ·  GOLDEN MILE TOWER", font=font("bold", 20), fill=J["muted"])
+    d.text((PAD, y), snap.get("venue", "CARNIVAL CINEMAS  ·  GOLDEN MILE TOWER"), font=font("bold", 20), fill=J["muted"])
     label, col = {"live": ("SHOWTIMES OUT", J["gold"]), "update": ("NEW SHOWS", J["gold"]),
                   "test": ("TEST RUN", C["test"])}[mode]
     sf = font("bold", 18)
@@ -531,9 +531,9 @@ def render_jailer(snap):
         lx += 22 + d.textlength(lab, font=font("regular", 18)) + 30
     if snap.get("more_days"):
         m = snap["more_days"]
-        d.text((W - PAD, fy + 13), f"+{m} more day{'s' if m != 1 else ''} on carnivalcinemas.sg",
+        d.text((W - PAD, fy + 13), f"+{m} more day{'s' if m != 1 else ''} on {snap.get('site', 'carnivalcinemas.sg')}",
                font=font("medium", 18), fill=J["gold"], anchor="rm")
-    d.text((PAD, fy + 44), "Book:  carnivalcinemas.sg  ·  Golden Mile Tower, Beach Road",
+    d.text((PAD, fy + 44), snap.get("footer", "Book:  carnivalcinemas.sg  ·  Golden Mile Tower, Beach Road"),
            font=font("medium", 22), fill=J["cream"])
 
     buf = io.BytesIO()
