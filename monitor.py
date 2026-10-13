@@ -25,9 +25,6 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-import carnival
-import mycinemas
-
 SGT = timezone(timedelta(hours=8))
 TEST_MODE = os.environ.get("TEST_MODE", "").lower() == "true"
 
@@ -293,12 +290,6 @@ def chat_ids():
     return ids
 
 
-def carnival_chat_ids():
-    """Optional CARNIVAL_CHAT_ID secret sends Jailer 2 alerts to different chats; default = everyone."""
-    ids = [c.strip() for c in os.environ.get("CARNIVAL_CHAT_ID", "").split(",") if c.strip()]
-    return ids or chat_ids()
-
-
 def send_telegram(text, with_buttons=False, everyone=False, silent=False, chats=None, markup=None):
     targets = chats or (chat_ids() if everyone else chat_ids()[:1])
     errors = []
@@ -417,7 +408,7 @@ def imax_text(snap):
 
 def deliver(png, caption, text, markup, chats=None):
     """Send to every chat: photo+caption, or text if the photo fails for that chat.
-    Test runs only ever go to the owner (first TELEGRAM_CHAT_ID), never to groups / CARNIVAL_CHAT_ID."""
+    Test runs only ever go to the owner (first TELEGRAM_CHAT_ID), never to groups."""
     delivered = 0
     if TEST_MODE:
         chats = chat_ids()[:1]
@@ -441,16 +432,13 @@ def deliver(png, caption, text, markup, chats=None):
         raise RuntimeError("Alert could not be delivered to any chat")
 
 
-def send_imax_alert(mode, shaw_ctx, new_dates, title=None, chats=None, theme=None, brand=None):
-    title = title or TITLE
-    snap = imax_snapshot(make_session(), shaw_ctx, mode, set(new_dates), title=title)
-    url = f"https://shaw.sg/movie-details/{snap['release_id']}" if (theme and snap.get("release_id")) else SHAW_URL
-    markup = {"inline_keyboard": [[{"text": "🎟 Book IMAX at Shaw", "url": url}]]}
-    snap["theme"], snap["brand"] = theme, brand or "DOOMSDAY WATCH"
-    head = {"live": f"🎯 <b>IMAX IS OPEN — {title}</b>",
-            "update": f"🎯 <b>New IMAX dates — {title}</b>",
-            "test": (f"🧪 <b>TEST RUN — Jailer 2 IMAX card</b> (stand-in: {title})" if theme == "jailer"
-                     else f"🧪 <b>TEST RUN — IMAX</b> ({title})")}[mode]
+def send_imax_alert(mode, shaw_ctx, new_dates):
+    snap = imax_snapshot(make_session(), shaw_ctx, mode, set(new_dates))
+    markup = {"inline_keyboard": [[{"text": "🎟 Book IMAX at Shaw", "url": SHAW_URL}]]}
+    snap["brand"] = "DOOMSDAY WATCH"
+    head = {"live": f"🎯 <b>IMAX IS OPEN — {TITLE}</b>",
+            "update": f"🎯 <b>New IMAX dates — {TITLE}</b>",
+            "test": f"🧪 <b>TEST RUN — IMAX</b> ({TITLE})"}[mode]
     if mode == "update" and new_dates:
         sub = "Just added: " + ", ".join(datetime.strptime(x, "%Y-%m-%d").strftime("%a %-d %b")
                                          for x in sorted(new_dates))
@@ -462,154 +450,7 @@ def send_imax_alert(mode, shaw_ctx, new_dates, title=None, chats=None, theme=Non
         png = card.render_imax(snap)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
-    deliver(png, f"{head}\n{sub}", f"{head}\n{imax_text(snap)}", markup, chats=chats)
-
-
-# ---------------------------------------------------------------- Jailer 2 IMAX at Shaw
-
-JAILER_TITLE = "Jailer 2"
-
-
-def check_shaw_jailer(session, test=False):
-    """Jailer 2 IMAX at Shaw. Keys (kept in state["jailer_imax_seen"]):
-         shawj:soon:<releaseId>              listed under Shaw's IMAX Coming Soon
-         shawj:sales:<releaseId>:<when>      Shaw published a ticket sales start time
-         shawj:listed:<movieId>              a bookable Jailer 2 IMAX listing exists
-         shawj:imaxdate:<movieId>:<date>     IMAX showtimes on that date (new dates re-alert)
-    In test mode the first bookable IMAX listing on Shaw stands in for Jailer 2."""
-    findings = {}
-    is_jailer = lambda n: bool(carnival.TARGET_RE.search(n or ""))  # noqa: E731
-
-    soon = get_json(session, f"{SHAW_BASE}/get_coming_soon_movies?movieBrand=IMAX",
-                    method="GET", headers=SHAW_HEADERS)
-    if not isinstance(soon, list):
-        raise SiteError("Shaw get_coming_soon_movies returned unexpected shape")
-    soon = [m for m in soon if is_jailer(m.get("primaryTitle"))]
-    for m in soon:
-        rid = m.get("movieReleaseId")
-        findings[f"shawj:soon:{rid}"] = m.get("primaryTitle")
-        if m.get("salesStartOn"):
-            findings[f"shawj:sales:{rid}:{m['salesStartOn']}"] = m.get("primaryTitle")
-
-    selectors = get_json(session, f"{SHAW_BASE}/get_selectors?cache=no-cache", method="GET", headers=SHAW_HEADERS)
-    if not isinstance(selectors, list):
-        raise SiteError("Shaw get_selectors returned unexpected shape")
-    locations = {str(x["code"]): x["name"].replace("Shaw Theatres ", "")
-                 for x in selectors if x.get("type") == 2}
-    films = [m for m in selectors if m.get("type") == 1 and IMAX_RE.search(m.get("name", ""))]
-    films = films[:1] if test else [m for m in films if is_jailer(m.get("name"))]
-    names = {str(m["code"]): m["name"] for m in films}
-    dates_by_movie = {}
-    for mid in names:
-        findings[f"shawj:listed:{mid}"] = names[mid]
-        dates = get_json(session, f"{SHAW_BASE}/get_date_selectors?movieId={mid}",
-                         method="GET", headers=SHAW_HEADERS)
-        if not isinstance(dates, list):
-            raise SiteError(f"Shaw get_date_selectors({mid}) returned unexpected shape")
-        codes = sorted(d.get("code") for d in dates if d.get("code"))
-        if codes:
-            dates_by_movie[mid] = codes
-            for dt in codes:
-                findings[f"shawj:imaxdate:{mid}:{dt}"] = f"{names[mid]} IMAX on {dt}"
-    title = (re.sub(r"\s*\([^()]*\)", "", next(iter(names.values()))).strip() or "IMAX test") if (test and names) \
-        else JAILER_TITLE
-    return findings, {"names": names, "dates": dates_by_movie, "locations": locations,
-                      "imax_codes": list(dates_by_movie), "soon": soon, "title": title}
-
-
-def handle_jailer_imax(jf, jctx, jseen):
-    new = [k for k in jf if k not in jseen]
-    if TEST_MODE:
-        if jctx["imax_codes"]:
-            send_imax_alert("test", jctx, [], title=jctx["title"], theme="jailer", brand="JAILER WATCH")
-        return jseen
-    new_dates = sorted({k.split(":")[-1] for k in new if k.startswith("shawj:imaxdate:")})
-    if new_dates:
-        first = not any(k.startswith("shawj:imaxdate:") for k in jseen)
-        send_imax_alert("live" if first else "update", jctx, new_dates, title=JAILER_TITLE,
-                        chats=carnival_chat_ids(), theme="jailer", brand="JAILER WATCH")
-    for m in jctx["soon"]:
-        rid = m.get("movieReleaseId")
-        link = {"inline_keyboard": [[{"text": "Shaw: Jailer 2 IMAX", "url": f"https://shaw.sg/movie-details/{rid}"}]]}
-        rel = (m.get("releaseDate") or "")[:10]
-        rel_txt = f" (release {datetime.strptime(rel, '%Y-%m-%d'):%a %-d %b})" if rel else ""
-        if f"shawj:soon:{rid}" in new:
-            send_telegram(f"👀 {m.get('primaryTitle')} is now Coming Soon at Shaw{rel_txt}. "
-                          f"You'll get the IMAX timetable the moment showtimes open.",
-                          silent=True, chats=carnival_chat_ids(), markup=link)
-        sale_key = next((k for k in new if k.startswith(f"shawj:sales:{rid}:")), None)
-        if sale_key:
-            when = m.get("salesStartOn") or ""
-            try:
-                when_txt = datetime.fromisoformat(when.replace("Z", "+00:00")).strftime("%a %-d %b, %-I:%M %p")
-            except ValueError:
-                when_txt = when
-            send_telegram(f"⏰ Shaw: <b>{m.get('primaryTitle')}</b> tickets go on sale <b>{when_txt}</b>.",
-                          chats=carnival_chat_ids(), markup=link)
-    return jseen | set(new)
-
-
-def send_carnival_alert(mode, ctx, new_keys):
-    snap = carnival.snapshot(make_session(), ctx, mode, new_keys, datetime.now(SGT))
-    markup = {"inline_keyboard": [[{"text": "🎟 Book on Carnival", "url": carnival.book_url(ctx)}]]}
-    png = None
-    try:
-        import card
-        png = card.render_jailer(snap)
-    except Exception:  # noqa: BLE001
-        traceback.print_exc()
-    deliver(png, carnival.caption(snap)[:1000], carnival.text(snap), markup, chats=carnival_chat_ids())
-
-
-def send_mycinemas_alert(mode, ctx, new_keys):
-    snap = mycinemas.snapshot(make_session(), ctx, mode, new_keys, datetime.now(SGT))
-    markup = {"inline_keyboard": [[{"text": "🎟 Book on MY Cinemas", "url": mycinemas.book_url(ctx)}]]}
-    png = None
-    try:
-        import card
-        png = card.render_jailer(snap)
-    except Exception:  # noqa: BLE001
-        traceback.print_exc()
-    deliver(png, mycinemas.caption(snap)[:1000], mycinemas.text(snap), markup, chats=carnival_chat_ids())
-
-
-def handle_mycinemas(mf, ctx, myc_seen):
-    """Same rules as Carnival: any new / newly bookable Jailer 2 show alerts; quiet note when it's announced."""
-    new = [k for k in mf if k not in myc_seen]
-    if TEST_MODE:
-        if ctx["sessions"]:
-            send_mycinemas_alert("test", ctx, [])
-        return myc_seen
-    show_new = [k for k in new if k.startswith(("myc:show:", "myc:open:"))]
-    if show_new:
-        first = not any(k.startswith("myc:show:") for k in myc_seen)
-        send_mycinemas_alert("live" if first else "update", ctx, show_new)
-    if "myc:soon" in new:
-        title, rel = ctx["soon"][0]
-        link = {"inline_keyboard": [[{"text": "🎟 MY Cinemas", "url": mycinemas.book_url(ctx)}]]}
-        send_telegram(f"👀 {title} is listed under What's Coming at MY Cinemas (Causeway Point), "
-                      f"release {datetime.strptime(rel, '%Y-%m-%d'):%a %-d %b}. "
-                      f"You'll get an alert the moment any showtime drops.",
-                      silent=True, chats=carnival_chat_ids(), markup=link)
-    return myc_seen | set(new)
-
-
-def handle_carnival(cf, ctx, car_seen):
-    """Alert on any new / newly bookable Jailer 2 show; quiet note when it's announced. Returns updated seen."""
-    new = [k for k in cf if k not in car_seen]
-    if TEST_MODE:
-        send_carnival_alert("test", ctx, [])
-        return car_seen
-    show_new = [k for k in new if k.startswith(("carnival:show:", "carnival:open:"))]
-    if show_new:
-        first = not any(k.startswith("carnival:show:") for k in car_seen)
-        send_carnival_alert("live" if first else "update", ctx, show_new)
-    if "carnival:soon" in new:
-        link = {"inline_keyboard": [[{"text": "🎟 Carnival Cinemas", "url": carnival.book_url(ctx)}]]}
-        send_telegram(f"👀 {carnival.TITLE} is now listed as Coming Soon on Carnival. "
-                      f"You'll get an alert the moment any showtime drops.",
-                      silent=True, chats=carnival_chat_ids(), markup=link)
-    return car_seen | set(new)
+    deliver(png, f"{head}\n{sub}", f"{head}\n{imax_text(snap)}", markup)
 
 
 # ---------------------------------------------------------------- state / main
@@ -654,69 +495,8 @@ def run():
                 send_telegram(f"⚠️ {site} check failing ({failures[site]}x in a row):\n"
                               f"<code>{str(e)[:300]}</code>")
 
-    car_seen = set(state.get("carnival_seen", []))
-    car_findings, car_ctx = None, None
-    try:
-        car_findings, car_ctx = carnival.check(make_session(), test=TEST_MODE)
-        ok_sites.append("Carnival")
-        if failures.get("Carnival", 0) >= FAIL_ALERT_AFTER and not TEST_MODE:
-            send_telegram("✅ Carnival checks are working again.")
-        failures["Carnival"] = 0
-    except Exception as e:  # noqa: BLE001
-        failures["Carnival"] = failures.get("Carnival", 0) + 1
-        print(f"[Carnival] {e}", file=sys.stderr)
-        if TEST_MODE or failures["Carnival"] == FAIL_ALERT_AFTER:
-            send_telegram(f"⚠️ Carnival check failing ({failures['Carnival']}x in a row):\n"
-                          f"<code>{str(e)[:300]}</code>")
-    if car_findings is not None:
-        try:
-            car_seen = handle_carnival(car_findings, car_ctx, car_seen)
-        except Exception:  # noqa: BLE001 — never let Jailer alerts break the Doomsday watch
-            traceback.print_exc()
-
-    myc_seen = set(state.get("mycinemas_seen", []))
-    myc_findings = None
-    try:
-        myc_findings, myc_ctx = mycinemas.check(make_session(), test=TEST_MODE)
-        ok_sites.append("MY Cinemas")
-        if failures.get("MY Cinemas", 0) >= FAIL_ALERT_AFTER and not TEST_MODE:
-            send_telegram("✅ MY Cinemas checks are working again.")
-        failures["MY Cinemas"] = 0
-    except Exception as e:  # noqa: BLE001
-        failures["MY Cinemas"] = failures.get("MY Cinemas", 0) + 1
-        print(f"[MY Cinemas] {e}", file=sys.stderr)
-        if TEST_MODE or failures["MY Cinemas"] == FAIL_ALERT_AFTER:
-            send_telegram(f"⚠️ MY Cinemas check failing ({failures['MY Cinemas']}x in a row):\n"
-                          f"<code>{str(e)[:300]}</code>")
-    if myc_findings is not None:
-        try:
-            myc_seen = handle_mycinemas(myc_findings, myc_ctx, myc_seen)
-        except Exception:  # noqa: BLE001 — never let this break the other watches
-            traceback.print_exc()
-
-    jseen = set(state.get("jailer_imax_seen", []))
-    jf = None
-    try:
-        jf, jctx = check_shaw_jailer(make_session(), test=TEST_MODE)
-        if failures.get("Shaw-Jailer", 0) >= FAIL_ALERT_AFTER and not TEST_MODE:
-            send_telegram("✅ Jailer 2 IMAX checks at Shaw are working again.")
-        failures["Shaw-Jailer"] = 0
-    except Exception as e:  # noqa: BLE001
-        failures["Shaw-Jailer"] = failures.get("Shaw-Jailer", 0) + 1
-        print(f"[Shaw-Jailer] {e}", file=sys.stderr)
-        if "Shaw" in ok_sites and (TEST_MODE or failures["Shaw-Jailer"] == FAIL_ALERT_AFTER):
-            send_telegram(f"⚠️ Jailer 2 IMAX check at Shaw failing ({failures['Shaw-Jailer']}x):\n"
-                          f"<code>{str(e)[:300]}</code>")
-    if jf is not None:
-        try:
-            jseen = handle_jailer_imax(jf, jctx, jseen)
-        except Exception:  # noqa: BLE001 — never let this break the other watches
-            traceback.print_exc()
-
     new_keys = [k for k in findings if k not in seen]
-    print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}"
-          f" | carnival={len(car_findings or {})} | mycinemas={len(myc_findings or {})}"
-          f" | jailer_imax={len(jf or {})}")
+    print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}")
 
     imax_codes = set((shaw_ctx or {}).get("imax_codes", []))
 
@@ -744,27 +524,14 @@ def run():
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_SGT and state.get("heartbeat") != today:
         status = "tickets are OUT (see earlier alerts)" if seen else "no showtimes yet"
-        pri = sum(1 for k in car_seen if k.startswith("carnival:show:"))
-        jailer = (f"showtimes OUT ({pri} show(s) seen)" if pri else
-                  "announced, no showtimes yet" if "carnival:soon" in car_seen else "not on Carnival yet")
-        mp = sum(1 for k in myc_seen if k.startswith("myc:show:"))
-        myc = (f"showtimes OUT ({mp} show(s) seen)" if mp else
-               "announced, no showtimes yet" if "myc:soon" in myc_seen else "not on MY Cinemas yet")
-        jd = sorted({k.split(":")[-1] for k in jseen if k.startswith("shawj:imaxdate:")})
-        jimax = (f"showtimes OUT ({len(jd)} date(s))" if jd else
-                 "Coming Soon, no showtimes yet" if any(k.startswith("shawj:soon:") for k in jseen) else
-                 "not on Shaw yet")
-        send_telegram(f"👀 Watch still running.\nDoomsday: {status}\nJailer 2 (Carnival): {jailer}\n"
-                      f"Jailer 2 (MY Cinemas): {myc}\n"
-                      f"Jailer 2 IMAX (Shaw): {jimax}\n"
+        send_telegram(f"👀 Watch still running.\nDoomsday: {status}\n"
                       f"Sites OK: {', '.join(ok_sites) or 'none!'}")
         state["heartbeat"] = today
 
     state["seen"] = sorted(seen)
-    state["carnival_seen"] = sorted(car_seen)
-    state["jailer_imax_seen"] = sorted(jseen)
-    state["mycinemas_seen"] = sorted(myc_seen)
-    state["failures"] = failures
+    for old in ("carnival_seen", "jailer_imax_seen", "mycinemas_seen"):   # Jailer 2 tracking was removed
+        state.pop(old, None)
+    state["failures"] = {k: v for k, v in failures.items() if k in ("Shaw", "GV")}
     save_state(state)
 
     hc = os.environ.get("HEALTHCHECK_URL")

@@ -23,46 +23,10 @@ Each finding is alerted once (tracked in `state.json`). New formats/cinemas open
 - 👀 **Daily heartbeat** after 9am SGT, so you know it's alive
 - ⚠️ **Check failing**: after 3 consecutive failed runs on a site; ✅ when it recovers
 
-## Jailer 2 at Carnival Cinemas (Golden Mile Tower)
-
-`carnival.py` watches Carnival's JSON API (`service.carnivalcinemas.sg`) for any title matching
-"Jailer 2" (incl. `(FDFS)`, language or `Jailer II` variants).
-
-- 🎬 Gold "JAILER 2" card the moment **any** showtime drops; 🆕 again whenever a new show is listed
-  or a listed show becomes bookable. Every show is a tile with booking state and seat classes /
-  prices / availability; early-morning shows (3–9 AM) get an **EARLY** badge.
-- A silent (no-sound) note when it's first announced as Coming Soon.
-- Optional secret `CARNIVAL_CHAT_ID` (comma-separated) to send Jailer alerts to different chats;
-  defaults to the same chats as `TELEGRAM_CHAT_ID`.
-
-## Jailer 2 IMAX at Shaw
-
-`check_shaw_jailer` in `monitor.py` watches Shaw for an IMAX listing matching "Jailer 2"
-(Shaw names Indian IMAX releases like `TITLE (IMAX) (Tam)`). Alerts go to the **Jailer chats**
-(`CARNIVAL_CHAT_ID`), never the Doomsday group:
-
-- 👀 silent note when it appears under Shaw's IMAX **Coming Soon**; ⏰ note if Shaw publishes a sales start time
-- 🎯 gold **IMAX timetable card** (every IMAX showtime by cinema and date) the moment showtimes open,
-  and again whenever Shaw adds new IMAX dates. State is kept separately in `state.json` → `jailer_imax_seen`.
-
-## Jailer 2 at MY Cinemas (Causeway Point)
-
-`mycinemas.py` checks mycinemas.sg (server-rendered pages, no JSON API) for Jailer 2 only:
-the pre-published Jailer 2 page (`/movie/jailer-2-2`) is polled directly, plus any homepage
-`/movie/...` link whose slug matches Jailer 2 (e.g. a separate FDFS page). Seat counts come from the
-site's own `ajax/book-status-ajax.php` (Available / Filling Fast >40% / Sold Out).
-
-- Same gold card as Carnival (MY Cinemas branding): alert on any new or newly bookable show,
-  with seats left per show and EARLY badges for 3–9 AM shows.
-- Silent note when Jailer 2 appears under "What's Coming" (with its release date).
-- Goes to the Jailer chats (`CARNIVAL_CHAT_ID`); state in `state.json` → `mycinemas_seen`.
-
 ## Files
 
 - `monitor.py`: the checks, state, and Telegram sending
 - `card.py`: renders the alert cards (Pillow); fonts are in `assets/fonts` (Poppins, OFL)
-- `carnival.py`: Carnival Cinemas / Jailer 2 checks
-- `mycinemas.py`: MY Cinemas / Jailer 2 checks
 
 ## Setup
 
