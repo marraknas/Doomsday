@@ -1,5 +1,14 @@
 {
   "carnival_seen": [
+    "carnival:any",
+    "carnival:open:35663",
+    "carnival:open:35664",
+    "carnival:open:35665",
+    "carnival:open:35666",
+    "carnival:show:35663",
+    "carnival:show:35664",
+    "carnival:show:35665",
+    "carnival:show:35666",
     "carnival:soon"
   ],
   "failures": {
