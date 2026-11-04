@@ -448,13 +448,15 @@ def deliver(png, caption, text, markup, chats=None):
         raise RuntimeError("Alert could not be delivered to any chat")
 
 
-def send_imax_alert(mode, shaw_ctx, new_dates):
-    snap = imax_snapshot(make_session(), shaw_ctx, mode, set(new_dates))
+def send_imax_alert(mode, shaw_ctx, new_dates, title=None):
+    title = title or TITLE
+    snap = imax_snapshot(make_session(), shaw_ctx, mode, set(new_dates), title=title)
     markup = {"inline_keyboard": [[{"text": "🎟 Book IMAX at Shaw", "url": SHAW_URL}]]}
     snap["brand"] = "DOOMSDAY WATCH"
-    head = {"live": f"🎯 <b>IMAX IS OPEN — {TITLE}</b>",
-            "update": f"🎯 <b>New IMAX dates — {TITLE}</b>",
-            "test": f"🧪 <b>TEST RUN — IMAX</b> ({TITLE})"}[mode]
+    head = {"live": f"🎯 <b>IMAX IS OPEN — {title}</b>",
+            "update": f"🎯 <b>New IMAX dates — {title}</b>",
+            "test": f"🧪 <b>TEST RUN — IMAX</b> ({title}"
+                    + (", stand-in: the test film has no IMAX shows now)" if title != TITLE else ")")}[mode]
     if mode == "update" and new_dates:
         sub = "Just added: " + ", ".join(datetime.strptime(x, "%Y-%m-%d").strftime("%a %-d %b")
                                          for x in sorted(new_dates))
@@ -467,6 +469,23 @@ def send_imax_alert(mode, shaw_ctx, new_dates):
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     deliver(png, f"{head}\n{sub}", f"{head}\n{imax_text(snap)}", markup)
+
+
+def imax_test_stand_in(session):
+    """Test runs only: when the test film has no IMAX shows on Shaw, borrow whichever IMAX film Shaw
+    has bookable right now, so the IMAX card still gets tested. Returns (ctx, title) or (None, None)."""
+    selectors = get_json(session, f"{SHAW_BASE}/get_selectors?cache=no-cache", method="GET", headers=SHAW_HEADERS)
+    locations = {str(x["code"]): x["name"].replace("Shaw Theatres ", "")
+                 for x in selectors if x.get("type") == 2}
+    for m in (x for x in selectors if x.get("type") == 1 and IMAX_RE.search(x.get("name", ""))):
+        mid = str(m["code"])
+        dates = get_json(session, f"{SHAW_BASE}/get_date_selectors?movieId={mid}", method="GET", headers=SHAW_HEADERS)
+        codes = sorted(d.get("code") for d in dates or [] if d.get("code"))
+        if codes:
+            title = re.sub(r"\s*\([^()]*\)", "", m["name"]).strip() or m["name"]
+            return {"names": {mid: m["name"]}, "dates": {mid: codes}, "locations": locations,
+                    "imax_codes": [mid]}, title
+    return None, None
 
 
 # ---------------------------------------------------------------- state / main
@@ -535,6 +554,16 @@ def run():
         send_alert("test", findings, new_keys, shaw_ctx, gv_rows)
         if imax_codes:
             send_imax_alert("test", shaw_ctx, [])
+        else:
+            try:
+                ctx, title = imax_test_stand_in(make_session())
+                if ctx:
+                    send_imax_alert("test", ctx, [], title=title)
+                else:
+                    send_telegram("🧪 <b>TEST RUN — IMAX</b>: Shaw has no IMAX showtimes on sale right now, "
+                                  "so there was nothing to draw the IMAX card with.")
+            except Exception as e:  # noqa: BLE001
+                send_telegram(f"🧪 <b>TEST RUN — IMAX</b> card failed:\n<code>{str(e)[:300]}</code>")
         return
 
     new_imax_dates = sorted({k.split(":")[-1] for k in new_keys if k.startswith("shaw:imaxdate:")})
