@@ -47,12 +47,28 @@ SHAW_URL = "https://shaw.sg/movie-details/1633"
 SHAW_BASE = "https://shaw.sg/internal"
 SHAW_HEADERS = {"x-api-forward-to": "internal", "x-app": "PWSM"}
 GV_BASE = "https://www.gv.com.sg/.gv-api"
-GV_HEADERS = {"Content-Type": "application/json; charset=utf-8", "X_Developer": "ENOVAX"}
+GV_HEADERS = {"Content-Type": "application/json; charset=utf-8", "X_Developer": "ENOVAX",
+              # what GV's own website sends; requests without these look more like a bot to GV's firewall
+              "Origin": "https://www.gv.com.sg", "Referer": "https://www.gv.com.sg/",
+              "Accept-Language": "en-SG,en;q=0.9"}
+GV_BLOCK_RETRY_WAIT = 20      # seconds to wait before one fresh retry when GV answers 403 (blocked)
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
 FAIL_ALERT_AFTER = 3          # consecutive failed runs before an error alert (~15 min)
+# GV's firewall now blocks GitHub's servers now and then (403) for a run or three, then lets them back in,
+# so GV only alerts after ~30 min of failures.
+FAIL_ALERT_AFTER_SITE = {"GV": 6}
+
+
+def alert_after(site):
+    return FAIL_ALERT_AFTER_SITE.get(site, FAIL_ALERT_AFTER)
+
+
+def gv_blocked(e):
+    """True when the site answered 403 Forbidden (a firewall block), not a timeout or other error."""
+    return "403 Client Error" in str(e)
 HEARTBEAT_HOUR_SGT = 9        # daily "still watching" message after 9am SGT
 SHAW_MAX_DATES = 21           # cap on per-date showtime lookups when building the card
 
@@ -482,18 +498,30 @@ def run():
             if site == "Shaw":
                 f, shaw_ctx = check_shaw(make_session())
             else:
-                f, gv_rows = check_gv(make_session())
+                try:
+                    f, gv_rows = check_gv(make_session())
+                except SiteError as e:
+                    if not gv_blocked(e):
+                        raise
+                    # blocked: wait a little, then try once more with a fresh session (new cookies)
+                    print(f"[GV] blocked ({e}); retrying in {GV_BLOCK_RETRY_WAIT}s", file=sys.stderr)
+                    time.sleep(GV_BLOCK_RETRY_WAIT)
+                    f, gv_rows = check_gv(make_session())
             findings.update(f)
             ok_sites.append(site)
-            if failures.get(site, 0) >= FAIL_ALERT_AFTER and not TEST_MODE:
+            if failures.get(site, 0) >= alert_after(site) and not TEST_MODE:
                 send_telegram(f"✅ {site} checks are working again.")
             failures[site] = 0
         except Exception as e:  # noqa: BLE001 — any failure counts, keep checking the other site
             failures[site] = failures.get(site, 0) + 1
             print(f"[{site}] {e}", file=sys.stderr)
-            if TEST_MODE or failures[site] == FAIL_ALERT_AFTER:
-                send_telegram(f"⚠️ {site} check failing ({failures[site]}x in a row):\n"
-                              f"<code>{str(e)[:300]}</code>")
+            if TEST_MODE or failures[site] == alert_after(site):
+                blocked = gv_blocked(e)
+                mins = failures[site] * 5
+                head = (f"⚠️ {site} is blocking the watcher (403) for ~{mins} min now. "
+                        f"This usually clears by itself; other checks keep running."
+                        if blocked else f"⚠️ {site} check failing ({failures[site]}x in a row):")
+                send_telegram(f"{head}\n<code>{str(e)[:300]}</code>")
 
     new_keys = [k for k in findings if k not in seen]
     print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}")
