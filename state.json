@@ -1,9 +1,9 @@
 {
   "failures": {
-    "GV": 5,
+    "GV": 6,
     "Shaw": 0
   },
-  "heartbeat": "2026-11-13",
+  "heartbeat": "2026-11-14",
   "seen": [
     "gv:listed:1471",
     "gv:listed:7508",
