@@ -57,18 +57,20 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
 FAIL_ALERT_AFTER = 3          # consecutive failed runs before an error alert (~15 min)
-# GV's firewall now blocks GitHub's servers now and then (403) for a run or three, then lets them back in,
-# so GV only alerts after ~30 min of failures.
-FAIL_ALERT_AFTER_SITE = {"GV": 6}
-
-
-def alert_after(site):
-    return FAIL_ALERT_AFTER_SITE.get(site, FAIL_ALERT_AFTER)
+FAIL_ALERT_AFTER_SITE = {"GV": 6}   # other GV errors (e.g. GV changed its site): ~30 min
+# Since mid-Nov GV's firewall blocks GitHub's servers (403) for up to ~30 min at a time, in about half of all
+# checks, while the checks in between still get through. Blocks alone only alert when GV has not been
+# reachable at all for ~3 hours, which would mean GV is blocking GitHub for good.
+GV_BLOCK_ALERT_AFTER = 36
 
 
 def gv_blocked(e):
     """True when the site answered 403 Forbidden (a firewall block), not a timeout or other error."""
     return "403 Client Error" in str(e)
+
+
+def alert_after(site):
+    return FAIL_ALERT_AFTER_SITE.get(site, FAIL_ALERT_AFTER)
 HEARTBEAT_HOUR_SGT = 9        # daily "still watching" message after 9am SGT
 SHAW_MAX_DATES = 21           # cap on per-date showtime lookups when building the card
 
@@ -330,7 +332,7 @@ def send_card(chat, png, caption):
        files={"photo": ("doomsday.png", png, "image/png")})
 
 
-def caption_for(mode, rows, new_rows):
+def caption_for(mode, rows, new_rows, extra=()):
     by = lambda c: sorted({r["label"] for r in rows if r["chain"] == c})  # noqa: E731
     firsts = [r["first"] for r in rows if r.get("first")]
     first = min(firsts, key=lambda f: f["sort"]) if firsts else None
@@ -342,7 +344,8 @@ def caption_for(mode, rows, new_rows):
         return f"🧪 <b>TEST RUN</b> — {TITLE}\n{chains}{first_line}"
     if mode == "live":
         return f"🚨 <b>AVENGERS: DOOMSDAY TICKETS ARE LIVE</b>\n{chains}{first_line}"
-    news = "\n".join(f"• {r['chain']} {r['label']}" for r in new_rows) or "• more showtimes"
+    news = "\n".join([f"• {r['chain']} {r['label']}" for r in new_rows] + [f"• {x}" for x in extra]) \
+        or "• more showtimes"
     return f"🆕 <b>New Doomsday showtimes</b>\n{news}"
 
 
@@ -368,7 +371,11 @@ def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
         rows.sort(key=lambda r: (order.get(r["label"], 2), -r["shows"]))
         png = card.render({"title": TITLE, "mode": mode, "checked_at": datetime.now(SGT),
                            "rows": rows})
-        caption = caption_for(mode, rows, [r for r in rows if r.get("new")])
+        # new listings with no showtimes yet have no row on the card, so name them in the caption
+        drawn = {(("gv" if r["chain"] == "GV" else "shaw"), str(r["code"])) for r in rows}
+        extra = [f"{findings[k]} (no showtimes yet)" for k in new_keys
+                 if (k.split(":")[0], k.split(":")[-1]) not in drawn] if mode == "update" else []
+        caption = caption_for(mode, rows, [r for r in rows if r.get("new")], extra)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
 
@@ -508,6 +515,10 @@ def run():
     state = load_state()
     seen = set(state.get("seen", []))
     failures = state.get("failures", {})
+    # sites we've sent a ⚠️ for, so the ✅ goes out exactly once when they recover
+    # (first run on this version: the old code had alerted for anything at/over its old thresholds)
+    alerted = set(state.get("alerted", [k for k, v in failures.items() if v >= alert_after(k)]))
+    soft_fails = state.get("other_failures", {})   # failures in the current streak that were NOT GV blocks
     now = datetime.now(SGT)
     findings, ok_sites = {}, []
     shaw_ctx, gv_rows = None, []
@@ -528,19 +539,29 @@ def run():
                     f, gv_rows = check_gv(make_session())
             findings.update(f)
             ok_sites.append(site)
-            if failures.get(site, 0) >= alert_after(site) and not TEST_MODE:
+            if site in alerted and not TEST_MODE:
                 send_telegram(f"✅ {site} checks are working again.")
-            failures[site] = 0
+            alerted.discard(site)
+            failures[site] = soft_fails[site] = 0
         except Exception as e:  # noqa: BLE001 — any failure counts, keep checking the other site
             failures[site] = failures.get(site, 0) + 1
             print(f"[{site}] {e}", file=sys.stderr)
-            if TEST_MODE or failures[site] == alert_after(site):
-                blocked = gv_blocked(e)
+            blocked = site == "GV" and gv_blocked(e)
+            if not blocked:
+                soft_fails[site] = soft_fails.get(site, 0) + 1
+            due = (failures[site] >= GV_BLOCK_ALERT_AFTER) if blocked else (soft_fails[site] >= alert_after(site))
+            if TEST_MODE or (due and site not in alerted):
                 mins = failures[site] * 5
-                head = (f"⚠️ {site} is blocking the watcher (403) for ~{mins} min now. "
-                        f"This usually clears by itself; other checks keep running."
-                        if blocked else f"⚠️ {site} check failing ({failures[site]}x in a row):")
+                if blocked:
+                    head = (f"⚠️ {site} has blocked every check for ~{mins // 60}h {mins % 60:02d}m. "
+                            f"Short blocks are normal now, but this long may mean {site} is blocking "
+                            f"GitHub for good. Other checks keep running."
+                            if mins >= 60 else f"⚠️ {site} is blocking the watcher (403) for ~{mins} min.")
+                else:
+                    head = f"⚠️ {site} check failing ({failures[site]}x in a row):"
                 send_telegram(f"{head}\n<code>{str(e)[:300]}</code>")
+                if not TEST_MODE:
+                    alerted.add(site)
 
     new_keys = [k for k in findings if k not in seen]
     print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}")
@@ -589,6 +610,8 @@ def run():
     for old in ("carnival_seen", "jailer_imax_seen", "mycinemas_seen"):   # Jailer 2 tracking was removed
         state.pop(old, None)
     state["failures"] = {k: v for k, v in failures.items() if k in ("Shaw", "GV")}
+    state["alerted"] = sorted(alerted)
+    state["other_failures"] = {k: v for k, v in soft_fails.items() if k in ("Shaw", "GV")}
     save_state(state)
 
     hc = os.environ.get("HEALTHCHECK_URL")
