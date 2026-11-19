@@ -1,13 +1,13 @@
 {
   "alerted": [],
   "failures": {
-    "GV": 2,
-    "Shaw": 1
+    "GV": 3,
+    "Shaw": 0
   },
   "heartbeat": "2026-11-19",
   "other_failures": {
     "GV": 0,
-    "Shaw": 1
+    "Shaw": 0
   },
   "seen": [
     "gv:listed:1471",
