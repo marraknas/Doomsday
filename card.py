@@ -588,3 +588,145 @@ def _tile(d, x, y, s, h):
         d.text((right, yy), fit(d, c["status"], font("regular", 16), 96), font=font("regular", 16),
                fill=col, anchor="ra")
         yy += 30
+
+
+# ---------------------------------------------------------------- DBS Sailing At The Bay alert card
+
+SAIL = {"sky_top": (18, 62, 128), "sky_low": (120, 205, 245), "sun": (255, 214, 102), "sea_top": (14, 116, 168),
+        "sea_low": (6, 52, 94), "crest": (214, 240, 252), "sail": (230, 38, 48), "jib": (250, 250, 247),
+        "hull": (16, 28, 52), "city": (64, 120, 168), "text": (255, 255, 255), "yellow": (255, 214, 102),
+        "ink": (8, 30, 58)}
+SAIL_W, SAIL_H, SS = 1200, 675, 2          # drawn at 2x, then scaled down for smooth edges
+
+
+def _vgrad(img, box, top, bottom):
+    x0, y0, x1, y1 = box
+    d = ImageDraw.Draw(img)
+    for y in range(y0, y1):
+        t = (y - y0) / max(1, y1 - y0 - 1)
+        d.line((x0, y, x1, y), fill=tuple(int(a + (b - a) * t) for a, b in zip(top, bottom)))
+
+
+def render_sailing(month=None, test=False, checked_at=None):
+    """'You can book <Month> slots now! Get ready to sail!' card: sky, sun, Marina Bay-ish skyline,
+    waves and a red-sailed dinghy. Pure drawing (the font has no emoji; emojis go in the caption)."""
+    s = SS
+    Wd, Hd = SAIL_W * s, SAIL_H * s
+    horizon = int(Hd * 0.60)
+    img = Image.new("RGB", (Wd, Hd))
+    _vgrad(img, (0, 0, Wd, horizon), SAIL["sky_top"], SAIL["sky_low"])
+    _vgrad(img, (0, horizon, Wd, Hd), SAIL["sea_top"], SAIL["sea_low"])
+
+    # sun with a soft glow
+    glow = Image.new("RGBA", (Wd, Hd), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    sx, sy, sr = int(Wd * 0.80), int(Hd * 0.20), 62 * s
+    gd.ellipse((sx - sr * 2.2, sy - sr * 2.2, sx + sr * 2.2, sy + sr * 2.2), fill=(255, 220, 130, 70))
+    glow = glow.filter(ImageFilter.GaussianBlur(40 * s))
+    img.paste(glow, (0, 0), glow)
+    d = ImageDraw.Draw(img)
+    d.ellipse((sx - sr, sy - sr, sx + sr, sy + sr), fill=SAIL["sun"])
+
+    # a few clouds
+    for cx, cy, k in ((0.56, 0.16, 1.0), (0.93, 0.38, 0.7), (0.70, 0.33, 0.55)):
+        cx, cy = int(Wd * cx), int(Hd * cy)
+        for dx, dy, r in ((-60, 8, 34), (-20, -10, 46), (30, 0, 38), (70, 12, 28)):
+            r = int(r * k * s)
+            x, y = cx + int(dx * k * s), cy + int(dy * k * s)
+            d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255))
+
+    # skyline on the horizon, in the gap between the headline and the boat (towers, a three-tower hotel
+    # with a deck on top, an observation wheel)
+    base = horizon
+    col = SAIL["city"]
+    for x, w, h in ((0.400, 22, 54), (0.420, 30, 86), (0.448, 24, 66), (0.535, 26, 92), (0.556, 20, 60),
+                    (0.575, 30, 76), (0.935, 26, 58), (0.958, 34, 84), (0.985, 24, 50)):
+        x0 = int(Wd * x)
+        d.rectangle((x0, base - h * s, x0 + w * s, base), fill=col)
+    hx = int(Wd * 0.470)
+    for i in range(3):
+        x0 = hx + i * 30 * s
+        d.polygon([(x0, base), (x0 + 4 * s, base - 100 * s), (x0 + 20 * s, base - 100 * s), (x0 + 20 * s, base)], fill=col)
+    d.rounded_rectangle((hx - 10 * s, base - 111 * s, hx + 90 * s, base - 100 * s), radius=6 * s, fill=col)
+    wx, wy, wr = int(Wd * 0.612), base - 48 * s, 40 * s
+    d.ellipse((wx - wr, wy - wr, wx + wr, wy + wr), outline=col, width=5 * s)
+    for k in range(8):
+        a = k * math.pi / 4
+        d.line((wx, wy, wx + math.cos(a) * wr, wy + math.sin(a) * wr), fill=col, width=2 * s)
+    d.polygon([(wx - 8 * s, wy), (wx + 8 * s, wy), (wx + 22 * s, base), (wx - 22 * s, base)], fill=col)
+
+    # waves: soft bands + white crests
+    for i, y in enumerate(range(horizon + 22 * s, Hd, 34 * s)):
+        amp, wl = (5 + i * 1.6) * s, (120 + i * 18) * s
+        pts = [(x, y + amp * math.sin((x + i * 47 * s) / wl * 2 * math.pi)) for x in range(0, Wd + 8, 8 * s)]
+        d.line(pts, fill=tuple(min(255, c + 24) for c in SAIL["sea_top"]), width=3 * s)
+        for x in range(int((i * 97) % 180) * s, Wd, (220 + i * 30) * s):
+            yy = y + amp * math.sin((x + i * 47 * s) / wl * 2 * math.pi)
+            d.arc((x, yy - 6 * s, x + 34 * s, yy + 10 * s), 200, 340, fill=SAIL["crest"], width=3 * s)
+
+    # sailboat (right side, riding the waves)
+    bx, by = int(Wd * 0.74), int(Hd * 0.80)
+    d.polygon([(bx - 150 * s, by), (bx + 160 * s, by), (bx + 115 * s, by + 42 * s), (bx - 110 * s, by + 42 * s)],
+              fill=SAIL["hull"])
+    d.line((bx - 150 * s, by, bx + 160 * s, by), fill=(255, 255, 255), width=5 * s)
+    mx = bx + 6 * s
+    d.line((mx, by, mx, by - 330 * s), fill=(40, 44, 56), width=7 * s)
+    d.polygon([(mx - 6 * s, by - 322 * s), (mx - 6 * s, by - 24 * s), (mx - 190 * s, by - 24 * s)], fill=SAIL["sail"])
+    for k in (0.33, 0.62):                                    # sail seams
+        y = by - 24 * s - (298 * s) * k
+        d.line((mx - 6 * s - 184 * s * (1 - k), y, mx - 6 * s, y), fill=(200, 26, 36), width=2 * s)
+    d.polygon([(mx + 8 * s, by - 300 * s), (mx + 8 * s, by - 28 * s), (mx + 150 * s, by - 28 * s)], fill=SAIL["jib"])
+    d.polygon([(mx - 6 * s, by - 336 * s), (mx + 40 * s, by - 322 * s), (mx - 6 * s, by - 308 * s)], fill=SAIL["yellow"])
+    for k in range(3):                                        # spray at the bow
+        d.arc((bx + 150 * s + k * 18 * s, by + 10 * s - k * 6 * s, bx + 190 * s + k * 22 * s, by + 42 * s),
+              200, 320, fill=SAIL["crest"], width=3 * s)
+
+    # gulls
+    for gx, gy, gs in ((0.58, 0.27, 1.0), (0.62, 0.23, 0.75), (0.66, 0.30, 0.6)):
+        x, y, w = int(Wd * gx), int(Hd * gy), int(26 * gs * s)
+        d.arc((x - w, y - w // 2, x, y + w // 2), 200, 340, fill=SAIL["ink"], width=3 * s)
+        d.arc((x, y - w // 2, x + w, y + w // 2), 200, 340, fill=SAIL["ink"], width=3 * s)
+
+    # left-side shade so the white text pops on the bright sky
+    shade = Image.new("RGBA", (Wd, Hd), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shade)
+    for x in range(0, int(Wd * 0.62)):
+        a = int(150 * (1 - x / (Wd * 0.62)) ** 1.6)
+        sd.line((x, 0, x, Hd), fill=(4, 22, 48, a))
+    img.paste(shade, (0, 0), shade)
+    img = img.resize((SAIL_W, SAIL_H), Image.LANCZOS)
+
+    # ---- text (drawn at final size so it stays crisp)
+    d = ImageDraw.Draw(img)
+    x = 64
+    tag = "SAILING AT THE BAY  ·  MARINA BAY"
+    tf = font("bold", 20)
+    tw = d.textlength(tag, font=tf)
+    d.rounded_rectangle((x, 62, x + tw + 36, 62 + 42), radius=21, fill=(255, 255, 255))
+    d.text((x + 18, 62 + 21), tag, font=tf, fill=SAIL["ink"], anchor="lm")
+    if test:
+        d.rounded_rectangle((x + tw + 50, 62, x + tw + 50 + 92, 104), radius=21, fill=(245, 184, 61))
+        d.text((x + tw + 50 + 46, 83), "TEST", font=tf, fill=SAIL["ink"], anchor="mm")
+
+    lines = ["You can book", f"{month} slots now!"] if month else ["New sailing slots", "open now!"]
+    hf = font("bold", 82)
+    while max(d.textlength(l, font=hf) for l in lines) > 690 and hf.size > 48:
+        hf = font("bold", hf.size - 4)
+    y = 150
+    for ln in lines:
+        d.text((x + 3, y + 4), ln, font=hf, fill=(4, 22, 48))          # soft drop shadow
+        d.text((x, y), ln, font=hf, fill=SAIL["text"])
+        y += int(hf.size * 1.12)
+    y += 14
+    d.text((x, y), "Get ready to sail!", font=font("bold", 46), fill=SAIL["yellow"])
+    y += 80
+    d.rounded_rectangle((x, y, x + 300, y + 58), radius=29, fill=SAIL["sail"])
+    d.text((x + 150, y + 29), "Register below", font=font("bold", 26), fill=(255, 255, 255), anchor="mm")
+    note = "Free sessions on the bay  ·  ages 7 to 70"
+    d.text((x, SAIL_H - 46), note, font=font("medium", 22), fill=(226, 240, 250))
+    if checked_at:
+        d.text((SAIL_W - 32, SAIL_H - 34), f"spotted {checked_at:%a %-d %b, %-I:%M %p}", font=font("regular", 18),
+               fill=(200, 226, 244), anchor="rm")
+    out = io.BytesIO()
+    img.save(out, "PNG", optimize=True)
+    return out.getvalue()

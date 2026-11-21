@@ -14,6 +14,7 @@ Env vars:
   HEALTHCHECK_URL                         optional dead-man's-switch ping (e.g. healthchecks.io)
 """
 
+import html
 import json
 import os
 import random
@@ -57,7 +58,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
 FAIL_ALERT_AFTER = 3          # consecutive failed runs before an error alert (~15 min)
-FAIL_ALERT_AFTER_SITE = {"GV": 6}   # other GV errors (e.g. GV changed its site): ~30 min
+FAIL_ALERT_AFTER_SITE = {"GV": 6,   # other GV errors (e.g. GV changed its site): ~30 min
+                         "DBS Sailing": 6}
 # Since mid-Nov GV's firewall blocks GitHub's servers (403) for up to ~30 min at a time, in about half of all
 # checks, while the checks in between still get through. Blocks alone only alert when GV has not been
 # reachable at all for ~3 hours, which would mean GV is blocking GitHub for good.
@@ -67,6 +69,9 @@ GV_BLOCK_ALERT_AFTER = 36
 def gv_blocked(e):
     """True when the site answered 403 Forbidden (a firewall block), not a timeout or other error."""
     return "403 Client Error" in str(e)
+
+
+SITES = ("Shaw", "GV", "DBS Sailing")
 
 
 def alert_after(site):
@@ -281,6 +286,113 @@ def check_gv(session):
                           "sort": first[1] + f"{time_key(first[2] or first[3]):04d}"},
             })
     return findings, rows
+
+
+# ---------------------------------------------------------------- DBS Sailing At The Bay
+#
+# www.dbs.com/sailing/index.html is a plain static page. Each month's sign-up is one red button in the
+# "regBtn" block, e.g.  <a href="https://cvent.me/5eZQML" class="redBtn ripple">November Registration</a>
+# ("Session bookings open one week prior to the start of each month"). We read every registration link
+# on the page (text + link) and alert the Jailer chats when one we have never seen appears: a new
+# "December Registration" button, the old button renamed, or the same text pointing at a new link.
+
+DBS_URL = "https://www.dbs.com/sailing/index.html"
+DBS_REG_RE = re.compile(r"regist|sign[\s-]*up|\bbook|cvent", re.I)
+DBS_MONTH_RE = re.compile(r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+                          r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b", re.I)
+DBS_WANTED_RE = re.compile(r"\bdec(?:ember)?\b", re.I)   # the month we're waiting for (also alerted on first run)
+
+
+def dbs_links(page):
+    """Registration links on the page as [(text, href)], in page order. Ignores commented-out HTML,
+    the FAQ anchor, e-mail links and share buttons."""
+    page = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+    out = []
+    for attrs, inner in re.findall(r"<a\b([^>]*)>(.*?)</a>", page, flags=re.S | re.I):
+        m = re.search(r"""href\s*=\s*["']([^"']*)["']""", attrs, re.I)
+        href = html.unescape(m.group(1).strip()) if m else ""
+        text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", inner))).strip()
+        if href.startswith(("#", "mailto:", "tel:")) or "sharer" in href or "share?" in href:
+            continue
+        if DBS_REG_RE.search(text) or DBS_REG_RE.search(href) or "redBtn" in attrs:
+            if (text, href) not in out:
+                out.append((text, href))
+    return out
+
+
+def check_dbs(session):
+    """-> [(text, href)] registration links on the DBS sailing page right now."""
+    last = None
+    for url, params in ((DBS_URL, {"nocache": int(time.time())}), (DBS_URL, None)):   # fresh copy first
+        try:
+            r = session.get(url, params=params, timeout=20,
+                            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                                     "Accept-Language": "en-SG,en;q=0.9", "Cache-Control": "no-cache"})
+            r.raise_for_status()
+            break
+        except requests.RequestException as e:
+            last = e
+            time.sleep(2)
+    else:
+        raise SiteError(f"{DBS_URL} → {type(last).__name__}: {str(last)[:150]}")
+    if not re.search(r"<title>[^<]*sailing", r.text, re.I):
+        raise SiteError("DBS sailing page didn't look right (bot check or redesign?): "
+                        + re.sub(r"\s+", " ", r.text[:150]))
+    return dbs_links(r.text)
+
+
+def dbs_sig(link):
+    return f"{link[0]} | {link[1]}"
+
+
+def dbs_chat_ids():
+    """CARNIVAL_CHAT_ID (comma-separated) = you + the Jailer group. Unset → you only, never the Doomsday chats."""
+    ids = [c.strip() for c in os.environ.get("CARNIVAL_CHAT_ID", "").split(",") if c.strip()]
+    return ids or chat_ids()[:1]
+
+
+def dbs_markup(links):
+    rows = [[{"text": f"⛵ {t or 'Register'}"[:60], "url": h}] for t, h in links[:3] if h.startswith("http")]
+    return {"inline_keyboard": rows + [[{"text": "DBS Sailing page", "url": DBS_URL}]]}
+
+
+MONTHS = {m[:3]: m for m in ("January", "February", "March", "April", "May", "June", "July", "August",
+                              "September", "October", "November", "December")}
+
+
+def dbs_month(links):
+    """Full month name mentioned in the first link text that has one ('December Registration' -> 'December')."""
+    for t, h in links:
+        m = DBS_MONTH_RE.search(t)
+        if m:
+            return MONTHS.get(m.group(0)[:3].title())
+    return None
+
+
+def send_dbs_alert(new_links, all_links, test=False):
+    """Sailing card (picture) + emoji caption + Register button; plain text where the picture fails.
+    Real alerts go to the DBS chats (you + the Jailer group); test runs only to you."""
+    wanted = [l for l in new_links if DBS_WANTED_RE.search(l[0])]
+    month = "December" if test else dbs_month(wanted or new_links)
+    link_lines = "\n".join(f"• “{t or 'button'}” → {h}" for t, h in (all_links if test else new_links))
+    if test:
+        caption = ("🧪 <b>TEST RUN — DBS Sailing</b>\nPage OK. On the page now:\n"
+                   + (link_lines or "• no registration button right now")
+                   + "\n\nThis is what the alert will look like when December opens ⛵")
+    elif month:
+        caption = (f"⛵🌊 <b>You can book {month} slots now!</b>\nGet ready to sail! ☀️⚓\n\n{link_lines}"
+                   f"\n\nTap Register below 👇")
+    else:
+        caption = (f"⛵🌊 <b>New DBS sailing registration is up!</b>\nGet ready to sail! ☀️⚓\n\n{link_lines}"
+                   f"\n\nTap Register below 👇")
+    markup = dbs_markup(all_links if test else new_links)
+    try:
+        import card
+        png = card.render_sailing(month, test=test, checked_at=None if test else datetime.now(SGT))
+    except Exception:  # noqa: BLE001 — the alert still goes out as text
+        traceback.print_exc()
+        png = None
+    deliver(png, caption, caption, markup, chats=chat_ids()[:1] if test else dbs_chat_ids())
 
 
 # ---------------------------------------------------------------- Telegram
@@ -522,11 +634,14 @@ def run():
     now = datetime.now(SGT)
     findings, ok_sites = {}, []
     shaw_ctx, gv_rows = None, []
+    dbs_now = None            # registration links on the DBS sailing page, if that check worked
 
-    for site in ("Shaw", "GV"):
+    for site in SITES:
         try:
             if site == "Shaw":
                 f, shaw_ctx = check_shaw(make_session())
+            elif site == "DBS Sailing":
+                f, dbs_now = {}, check_dbs(make_session())
             else:
                 try:
                     f, gv_rows = check_gv(make_session())
@@ -585,6 +700,8 @@ def run():
                                   "so there was nothing to draw the IMAX card with.")
             except Exception as e:  # noqa: BLE001
                 send_telegram(f"🧪 <b>TEST RUN — IMAX</b> card failed:\n<code>{str(e)[:300]}</code>")
+        if dbs_now is not None:
+            send_dbs_alert([], dbs_now, test=True)
         return
 
     new_imax_dates = sorted({k.split(":")[-1] for k in new_keys if k.startswith("shaw:imaxdate:")})
@@ -599,19 +716,36 @@ def run():
         send_alert("live" if not seen else "update", findings, new_keys, shaw_ctx, gv_rows)
     seen |= set(new_keys)
 
+    if dbs_now is not None:
+        dbs_seen = state.get("dbs_seen")
+        if dbs_seen is None:   # first run: remember what's there now; only alert if December is already up
+            new_dbs = [l for l in dbs_now if DBS_WANTED_RE.search(l[0])]
+        else:
+            new_dbs = [l for l in dbs_now if dbs_sig(l) not in dbs_seen]
+        try:
+            if new_dbs:
+                send_dbs_alert(new_dbs, dbs_now)
+            # remember every link ever shown, so a flickering page/CDN can't alert twice for the same one
+            state["dbs_seen"] = sorted(set(dbs_seen or []) | {dbs_sig(l) for l in dbs_now})
+        except Exception:  # noqa: BLE001 — not marked as seen, so the next run tries again
+            traceback.print_exc()
+        state["dbs_now"] = [t for t, h in dbs_now]
+
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_SGT and state.get("heartbeat") != today:
         status = "tickets are OUT (see earlier alerts)" if seen else "no showtimes yet"
-        send_telegram(f"👀 Watch still running.\nDoomsday: {status}\n"
+        dbs_line = (f"DBS Sailing: page shows {', '.join(f'“{t}”' for t, h in dbs_now) or 'no registration button'}"
+                    if dbs_now is not None else "DBS Sailing: check failed this run")
+        send_telegram(f"👀 Watch still running.\nDoomsday: {status}\n{dbs_line}\n"
                       f"Sites OK: {', '.join(ok_sites) or 'none!'}")
         state["heartbeat"] = today
 
     state["seen"] = sorted(seen)
     for old in ("carnival_seen", "jailer_imax_seen", "mycinemas_seen"):   # Jailer 2 tracking was removed
         state.pop(old, None)
-    state["failures"] = {k: v for k, v in failures.items() if k in ("Shaw", "GV")}
+    state["failures"] = {k: v for k, v in failures.items() if k in SITES}
     state["alerted"] = sorted(alerted)
-    state["other_failures"] = {k: v for k, v in soft_fails.items() if k in ("Shaw", "GV")}
+    state["other_failures"] = {k: v for k, v in soft_fails.items() if k in SITES}
     save_state(state)
 
     hc = os.environ.get("HEALTHCHECK_URL")
