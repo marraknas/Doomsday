@@ -371,14 +371,14 @@ def dbs_month(links):
 
 def send_dbs_alert(new_links, all_links, test=False):
     """Sailing card (picture) + emoji caption + Register button; plain text where the picture fails.
-    Real alerts go to the DBS chats (you + the Jailer group); test runs only to you."""
+    Real alerts AND the test-run card go to the DBS chats (you + the Jailer group)."""
     wanted = [l for l in new_links if DBS_WANTED_RE.search(l[0])]
     month = "December" if test else dbs_month(wanted or new_links)
     link_lines = "\n".join(f"• “{t or 'button'}” → {h}" for t, h in (all_links if test else new_links))
     if test:
         caption = ("🧪 <b>TEST RUN — DBS Sailing</b>\nPage OK. On the page now:\n"
                    + (link_lines or "• no registration button right now")
-                   + "\n\nThis is what the alert will look like when December opens ⛵")
+                   + "\n\nThis is a test: it's what the alert will look like when December opens ⛵")
     elif month:
         caption = (f"⛵🌊 <b>You can book {month} slots now!</b>\nGet ready to sail! ☀️⚓\n\n{link_lines}"
                    f"\n\nTap Register below 👇")
@@ -392,7 +392,8 @@ def send_dbs_alert(new_links, all_links, test=False):
     except Exception:  # noqa: BLE001 — the alert still goes out as text
         traceback.print_exc()
         png = None
-    deliver(png, caption, caption, markup, chats=chat_ids()[:1] if test else dbs_chat_ids())
+    # the DBS test card goes to the same chats as a real DBS alert (you + the Jailer group)
+    deliver(png, caption, caption, markup, chats=dbs_chat_ids(), test_ok=test)
 
 
 # ---------------------------------------------------------------- Telegram
@@ -541,11 +542,12 @@ def imax_text(snap):
     return "\n".join(lines)
 
 
-def deliver(png, caption, text, markup, chats=None):
+def deliver(png, caption, text, markup, chats=None, test_ok=False):
     """Send to every chat: photo+caption, or text if the photo fails for that chat.
-    Test runs only ever go to the owner (first TELEGRAM_CHAT_ID), never to groups."""
+    Test runs only go to the owner (first TELEGRAM_CHAT_ID), never to groups,
+    unless the caller says groups may see this test (test_ok: the DBS sailing test card)."""
     delivered = 0
-    if TEST_MODE:
+    if TEST_MODE and not test_ok:
         chats = chat_ids()[:1]
     for chat in chats or chat_ids():
         try:
