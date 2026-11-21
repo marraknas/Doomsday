@@ -1,11 +1,19 @@
 {
   "alerted": [],
+  "dbs_now": [
+    "November Registration"
+  ],
+  "dbs_seen": [
+    "November Registration | https://cvent.me/5eZQML"
+  ],
   "failures": {
-    "GV": 0,
+    "DBS Sailing": 0,
+    "GV": 1,
     "Shaw": 0
   },
   "heartbeat": "2026-11-21",
   "other_failures": {
+    "DBS Sailing": 0,
     "GV": 0,
     "Shaw": 0
   },
