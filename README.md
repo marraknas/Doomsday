@@ -16,7 +16,9 @@ Each finding is alerted once (tracked in `state.json`). New formats/cinemas open
 
 - 🚨 **Tickets are out**: a dashboard card (formats, cinemas, show counts, dates, first show per
   format, for both chains) with **Book at GV / Book at Shaw** buttons
-- 🆕 **More showtimes/formats opened**: the same card, with new formats badged **NEW**
+- 🆕 **More showtimes opened**: the same card, with what changed badged **NEW** and spelled out in the
+  caption: a new format/listing, **new dates** for a listing already on sale (up to 31 Dec, the opening run),
+  or a listing showing at a **new cinema** (e.g. "Shaw Infinity Vision: new dates Thu 17 Dec – Wed 23 Dec").
 - 🎯 **IMAX (Shaw)**: a separate IMAX timetable card (every IMAX showtime by cinema and date,
   with available / selling fast / sold out) when IMAX opens, and again whenever Shaw adds new IMAX dates
 - If the card can't be rendered for any reason, the alert still goes out as plain text

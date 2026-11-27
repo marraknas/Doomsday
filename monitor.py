@@ -78,6 +78,18 @@ def alert_after(site):
     return FAIL_ALERT_AFTER_SITE.get(site, FAIL_ALERT_AFTER)
 HEARTBEAT_HOUR_SGT = 9        # daily "still watching" message after 9am SGT
 SHAW_MAX_DATES = 21           # cap on per-date showtime lookups when building the card
+# New dates and new cinemas for a listing the bot already knows also alert (Shaw opened 17–23 Dec under its
+# existing Doomsday listing on 27 Nov and nothing fired). Dates only up to this day: after the opening run
+# cinemas add a date every day, which would be a daily alert.
+NEW_DATE_ALERTS_UNTIL = "2026-12-31"
+SHAW_CINEMA_SAMPLE = (4, 2)   # showtime lookups per run for spotting new Shaw cinemas: first 4 + last 2 dates
+DETAIL_KINDS = ("date", "cinema")
+
+
+def key_code(k):
+    """Film/listing code of a finding key: shaw:dates:1395 -> 1395, shaw:date:1395:2026-12-17 -> 1395."""
+    parts = k.split(":")
+    return parts[2] if len(parts) > 3 or parts[1] in DETAIL_KINDS + ("imaxdate",) else parts[-1]
 
 
 class SiteError(Exception):
@@ -169,6 +181,18 @@ def check_shaw(session):
             if IMAX_RE.search(label):
                 for dt in codes:          # every IMAX date is its own finding → new dates re-alert
                     findings[f"shaw:imaxdate:{mid}:{dt}"] = f"Shaw IMAX showtimes on {dt}"
+            else:
+                for dt in codes:          # new dates under a listing we already know (opening run only)
+                    if dt <= NEW_DATE_ALERTS_UNTIL:
+                        findings[f"shaw:date:{mid}:{dt}"] = f"Shaw {shaw_format(label)}: new date {dt}"
+                first_n, last_n = SHAW_CINEMA_SAMPLE
+                for dt in dict.fromkeys(codes[:first_n] + codes[-last_n:]):   # cinemas showing it
+                    for movie in get_json(session, f"{SHAW_BASE}/get_show_times?date={dt}&movieId={mid}",
+                                          method="GET", headers=SHAW_HEADERS) or []:
+                        for st in movie.get("showTimes") or []:
+                            loc = str(st.get("locationId"))
+                            findings[f"shaw:cinema:{mid}:{loc}"] = (
+                                f"Shaw {shaw_format(label)}: now at {locations.get(loc, loc)}")
     imax_codes = [mid for mid, n in names.items() if IMAX_RE.search(n)]
     return findings, {"names": names, "dates": dates_by_movie, "locations": locations,
                       "imax_codes": imax_codes}
@@ -277,6 +301,10 @@ def check_gv(session):
             f"{len({s[0] for g in groups.values() for s in g})} cinema(s), "
             f"{all_dates[0]} → {all_dates[-1]}")
         for label, shows in groups.items():
+            for cinema, day, _, _ in shows:
+                findings[f"gv:cinema:{code}:{cinema}"] = f"GV {label}: now at {cinema}"
+                if day <= NEW_DATE_ALERTS_UNTIL:
+                    findings[f"gv:date:{code}:{day}"] = f"GV {label}: new date {day}"
             first = min(shows, key=lambda s: (s[1], s[2]))
             rows.append({
                 "chain": "GV", "code": code, "label": label, "note": None,
@@ -462,13 +490,51 @@ def caption_for(mode, rows, new_rows, extra=()):
     return f"🆕 <b>New Doomsday showtimes</b>\n{news}"
 
 
+def _day(d):
+    return f"{datetime.strptime(d, '%Y-%m-%d'):%a %-d %b}"
+
+
+def detail_lines(keys, findings, shaw_ctx=None):
+    """One line per listing for new dates / new cinemas, e.g.
+       'Shaw Infinity Vision: new dates Thu 17 Dec – Wed 23 Dec (7 days)'  /  'GV Standard: now at GV Jurong'."""
+    out, groups = [], {}
+    names = (shaw_ctx or {}).get("names", {})
+    for k in keys:
+        chain, kind = k.split(":")[0], k.split(":")[1]
+        if kind not in DETAIL_KINDS:
+            out.append(findings.get(k, k))
+            continue
+        label = findings.get(k, "").split(":")[0]           # "Shaw Infinity Vision" / "GV Gold Class"
+        g = groups.setdefault((label or chain, key_code(k)), {"date": [], "cinema": []})
+        g[kind].append(k.split(":", 3)[3])
+    for (label, code), g in groups.items():
+        if g["date"]:
+            ds = sorted(g["date"])
+            span = _day(ds[0]) if len(ds) == 1 else f"{_day(ds[0])} – {_day(ds[-1])} ({len(ds)} days)"
+            out.append(f"{label}: new date{'s' if len(ds) > 1 else ''} {span}")
+        if g["cinema"]:
+            where = sorted({findings.get(f"{'gv' if label.startswith('GV') else 'shaw'}:cinema:{code}:{c}", c)
+                            .split("now at ")[-1] for c in g["cinema"]})
+            out.append(f"{label}: now at {', '.join(where)}")
+    return out
+
+
 def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
     """Ticket alerts go to every chat. Card first; plain text for any chat where the card fails."""
     head = {"test": f"🧪 <b>TEST RUN</b> ({TITLE})",
             "live": "🚨🚨 <b>AVENGERS: DOOMSDAY TICKETS ARE OUT!</b>",
             "update": "🆕 <b>More Doomsday showtimes/formats just opened</b>"}[mode]
     items = findings if mode == "test" else {k: findings[k] for k in new_keys}
-    text = f"{head}\n" + ("\n".join(f"• {v}" for v in items.values()) or "• nothing found")
+    # dates/cinemas of a listing that is itself new are already covered by that listing's line
+    fresh = {(k.split(":")[0], key_code(k)) for k in new_keys if k.split(":")[1] not in DETAIL_KINDS}
+    details = [k for k in new_keys if k.split(":")[1] in DETAIL_KINDS and (k.split(":")[0], key_code(k)) not in fresh]
+    if mode == "update":
+        lines = detail_lines([k for k in new_keys if k.split(":")[1] not in DETAIL_KINDS] + details,
+                             findings, shaw_ctx)
+        text = f"{head}\n" + "\n".join(f"• {v}" for v in lines)
+    else:
+        text = f"{head}\n" + ("\n".join(f"• {v}" for k, v in items.items()
+                                       if k.split(":")[1] not in DETAIL_KINDS) or "• nothing found")
 
     png = caption = None
     try:
@@ -478,7 +544,7 @@ def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
             rows += shaw_rows(make_session(), shaw_ctx)
         for r in rows:
             prefix = "gv" if r["chain"] == "GV" else "shaw"
-            r["new"] = mode != "test" and any(k.startswith(f"{prefix}:") and k.endswith(f":{r['code']}")
+            r["new"] = mode != "test" and any(k.startswith(f"{prefix}:") and key_code(k) == str(r["code"])
                                               for k in new_keys)
         order = {"Standard": 0, "Gold Class": 1}
         rows.sort(key=lambda r: (order.get(r["label"], 2), -r["shows"]))
@@ -486,9 +552,13 @@ def send_alert(mode, findings, new_keys, shaw_ctx, gv_rows):
                            "rows": rows})
         # new listings with no showtimes yet have no row on the card, so name them in the caption
         drawn = {(("gv" if r["chain"] == "GV" else "shaw"), str(r["code"])) for r in rows}
-        extra = [f"{findings[k]} (no showtimes yet)" for k in new_keys
-                 if (k.split(":")[0], k.split(":")[-1]) not in drawn] if mode == "update" else []
-        caption = caption_for(mode, rows, [r for r in rows if r.get("new")], extra)
+        extra = ([f"{findings[k]} (no showtimes yet)" for k in new_keys
+                  if k.split(":")[1] == "listed" and (k.split(":")[0], key_code(k)) not in drawn]
+                 + detail_lines(details, findings, shaw_ctx)
+                 ) if mode == "update" else []
+        new_rows = [r for r in rows if r.get("new")
+                    and any(k.split(":")[1] not in DETAIL_KINDS and key_code(k) == str(r["code"]) for k in new_keys)]
+        caption = caption_for(mode, rows, new_rows, extra)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
 
@@ -628,6 +698,7 @@ def save_state(state):
 def run():
     state = load_state()
     seen = set(state.get("seen", []))
+    first_ever = not seen     # nothing alerted yet → the next ticket alert is the big 'tickets are live' one
     failures = state.get("failures", {})
     # sites we've sent a ⚠️ for, so the ✅ goes out exactly once when they recover
     # (first run on this version: the old code had alerted for anything at/over its old thresholds)
@@ -680,13 +751,20 @@ def run():
                 if not TEST_MODE:
                     alerted.add(site)
 
+    if not TEST_MODE:
+        baselined = set(state.get("detail_baselined", []))
+        for site, prefix in (("Shaw", "shaw:"), ("GV", "gv:")):
+            if site in ok_sites and site not in baselined:
+                seen |= {k for k in findings if k.startswith(prefix) and k.split(":")[1] in DETAIL_KINDS}
+                baselined.add(site)
+        state["detail_baselined"] = sorted(baselined)
     new_keys = [k for k in findings if k not in seen]
     print(f"{now:%Y-%m-%d %H:%M} SGT | ok={ok_sites} | findings={len(findings)} | new={len(new_keys)}")
 
     imax_codes = set((shaw_ctx or {}).get("imax_codes", []))
 
     def is_imax(k):
-        return k.startswith("shaw:imaxdate:") or (k.startswith("shaw:") and k.split(":")[-1] in imax_codes)
+        return k.startswith("shaw:imaxdate:") or (k.startswith("shaw:") and key_code(k) in imax_codes)
 
     if TEST_MODE:
         send_alert("test", findings, new_keys, shaw_ctx, gv_rows)
@@ -715,7 +793,7 @@ def run():
             traceback.print_exc()
     other = [k for k in new_keys if not is_imax(k)]
     if other:
-        send_alert("live" if not seen else "update", findings, new_keys, shaw_ctx, gv_rows)
+        send_alert("live" if first_ever else "update", findings, new_keys, shaw_ctx, gv_rows)
     seen |= set(new_keys)
 
     if dbs_now is not None:
