@@ -7,9 +7,12 @@
     "December Registration | https://cvent.me/5ZaZWD",
     "November Registration | https://cvent.me/5eZQML"
   ],
+  "detail_baselined": [
+    "Shaw"
+  ],
   "failures": {
     "DBS Sailing": 0,
-    "GV": 1,
+    "GV": 2,
     "Shaw": 0
   },
   "heartbeat": "2026-11-27",
@@ -28,6 +31,15 @@
     "gv:sessions:1490",
     "gv:sessions:7508",
     "gv:sessions:7533",
+    "shaw:cinema:1395:1",
+    "shaw:date:1395:2026-12-16",
+    "shaw:date:1395:2026-12-17",
+    "shaw:date:1395:2026-12-18",
+    "shaw:date:1395:2026-12-19",
+    "shaw:date:1395:2026-12-20",
+    "shaw:date:1395:2026-12-21",
+    "shaw:date:1395:2026-12-22",
+    "shaw:date:1395:2026-12-23",
     "shaw:dates:1395",
     "shaw:listed:1395"
   ]
