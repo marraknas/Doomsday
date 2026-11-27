@@ -8,11 +8,12 @@
     "November Registration | https://cvent.me/5eZQML"
   ],
   "detail_baselined": [
+    "GV",
     "Shaw"
   ],
   "failures": {
     "DBS Sailing": 0,
-    "GV": 3,
+    "GV": 0,
     "Shaw": 0
   },
   "heartbeat": "2026-11-27",
@@ -22,6 +23,18 @@
     "Shaw": 0
   },
   "seen": [
+    "gv:cinema:1471:GV Grand, Great World",
+    "gv:cinema:1471:GV VivoCity",
+    "gv:cinema:1490:GV VivoCity",
+    "gv:cinema:1490:GVmax, VivoCity",
+    "gv:cinema:7508:GV VivoCity",
+    "gv:cinema:7508:GVmax, VivoCity",
+    "gv:cinema:7533:GV Cineleisure",
+    "gv:date:1471:2026-12-16",
+    "gv:date:1471:2026-12-17",
+    "gv:date:1490:2026-12-17",
+    "gv:date:7508:2026-12-16",
+    "gv:date:7533:2026-12-16",
     "gv:listed:1471",
     "gv:listed:1490",
     "gv:listed:7508",
